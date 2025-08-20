@@ -1,0 +1,1494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=600, initial-scale=1.0" />
+  <title>Match-3 Game</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; display: flex; flex-direction: column; align-items: center;
+      justify-content: flex-start; min-height: 100vh; background: #222; font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif;
+    }
+    #gameWrapper { margin-top: 16px; position: relative; }
+    canvas { background: #333; border-radius: 16px; box-shadow: 0 4px 32px #000a; display: block; }
+
+    #resetBtn, .hud-btn {
+      margin-top: 20px;
+      font-weight: 700; font-size: 18px;
+      background: linear-gradient(90deg, #e74c3c 0%, #3498db 100%);
+      color: #fff; padding: 10px 24px; border: none; border-radius: 999px;
+      box-shadow: 0 2px 16px #0005; cursor: pointer; letter-spacing: 1px;
+      transition: transform .07s; outline: none;
+    }
+    #resetBtn:active, .hud-btn:active { transform: scale(0.97); }
+
+    .hud-bar {
+      width: 600px; display: flex; justify-content: space-between; gap: 8px; margin-top: 12px;
+    }
+    .hud-btn { background: #444; padding: 8px 14px; font-size: 14px; }
+    .hud-btn:active { transform: scale(0.98); }
+
+    /* Options drawer */
+    #optionsPanel {
+      position: absolute; top: 66px; right: 8px; width: 240px; z-index: 5;
+      background: #1b1b1d; border: 1px solid #2b2b2e; border-radius: 12px; box-shadow: 0 8px 32px #0009;
+      padding: 12px; display: none;
+    }
+    #optionsPanel h3 { margin: 0 0 8px 0; font-size: 16px; color: #fff; }
+    #optionsPanel label { display: flex; align-items: center; gap: 8px; color: #ddd; font-size: 13px; margin: 8px 0; }
+    #optionsPanel .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    #optionsPanel select, #optionsPanel input[type="range"] {
+      width: 120px; background: #2a2a2e; color: #fff; border: 1px solid #3a3a3e; border-radius: 6px; padding: 3px 6px;
+    }
+    #optionsPanel .sub { color:#9aa; font-size: 12px; margin-top: 6px; }
+
+    /* Pause overlay buttons (HTML for accessibility) */
+    #overlayButtons {
+      position: absolute; inset: 0; display: none; align-items: center; justify-content: center; gap: 16px; z-index: 6;
+    }
+    #overlayButtons button {
+      background:#2a2a2e; color:#fff; border:1px solid #3a3a2e; border-radius:10px; padding:10px 16px; cursor:pointer; font-weight:600;
+    }
+    #overlayButtons button:hover { background:#333; }
+
+    @media (max-width: 620px) {
+      .hud-bar { width: 100%; padding: 0 10px; box-sizing: border-box; }
+    }
+  </style>
+</head>
+<body>
+  <div class="hud-bar">
+    <button id="resetBtn">Restart</button>
+    <div style="display:flex; gap:8px;">
+      <button id="pauseBtn" class="hud-btn">Pause</button>
+      <button id="optionsBtn" class="hud-btn">⚙️ Options</button>
+    </div>
+  </div>
+
+  <div id="gameWrapper">
+    <canvas id="gameCanvas" width="600" height="700"></canvas>
+
+    <!-- Options drawer -->
+    <div id="optionsPanel">
+      <h3>Options</h3>
+      <label><input type="checkbox" id="optSfx"> Enable SFX</label>
+      <label><input type="checkbox" id="optShake"> Screen Shake</label>
+
+      <div class="row">
+        <span>Particles</span>
+        <select id="optParticles">
+          <option value="low">Low</option>
+          <option value="med">Med</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+
+      <label><input type="checkbox" id="optReduce"> Reduce Motion</label>
+
+      <div class="row">
+        <span>Volume</span>
+        <input type="range" min="0" max="100" value="90" id="optVolume"/>
+      </div>
+      <div class="sub">Settings are saved automatically.</div>
+    </div>
+
+    <!-- Pause overlay HTML buttons -->
+    <div id="overlayButtons">
+      <button id="resumeBtn">Resume</button>
+      <button id="overlayRestartBtn">Restart</button>
+    </div>
+  </div>
+
+  <script>
+    // --- Config ---
+    const GRID_SIZE = 10;
+    const TOPBAR_HEIGHT = 60;
+    const CELL_SIZE = 60;
+    const CANVAS_W = CELL_SIZE * GRID_SIZE;
+    const CANVAS_H = TOPBAR_HEIGHT + CELL_SIZE * GRID_SIZE;
+    const COLORS = ['#e74c3c', '#f39c12', '#f1c40f', '#2ecc71', '#3498db', '#9b59b6'];
+    const FALL_SPEED = 8, MATCH_ANIM_SPEED = 0.08, SWAP_SPEED = 0.2;
+
+    const canvas = document.getElementById('gameCanvas');
+    const resetBtn = document.getElementById('resetBtn');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const optionsBtn = document.getElementById('optionsBtn');
+    const optionsPanel = document.getElementById('optionsPanel');
+    const overlayButtons = document.getElementById('overlayButtons');
+    const resumeBtn = document.getElementById('resumeBtn');
+    const overlayRestartBtn = document.getElementById('overlayRestartBtn');
+
+    const optSfx = document.getElementById('optSfx');
+    const optShake = document.getElementById('optShake');
+    const optParticles = document.getElementById('optParticles');
+    // --- Robust match detection and special creation ---
+    function findAllRuns() {
+      const runs = [];
+      // Horizontal
+      for (let y = 0; y < GRID_SIZE; y++) {
+        let run = [{x:0, y}];
+        for (let x = 1; x < GRID_SIZE; x++) {
+          if (grid[y][x].color === grid[y][x-1].color) {
+            run.push({x, y});
+          } else {
+            if (run.length >= 3) runs.push({positions: [...run], orient: 'h'});
+            run = [{x, y}];
+          }
+        }
+        if (run.length >= 3) runs.push({positions: [...run], orient: 'h'});
+      }
+      // Vertical
+      for (let x = 0; x < GRID_SIZE; x++) {
+        let run = [{x, y:0}];
+        for (let y = 1; y < GRID_SIZE; y++) {
+          if (grid[y][x].color === grid[y-1][x].color) {
+            run.push({x, y});
+          } else {
+            if (run.length >= 3) runs.push({positions: [...run], orient: 'v'});
+            run = [{x, y}];
+          }
+        }
+        if (run.length >= 3) runs.push({positions: [...run], orient: 'v'});
+      }
+      return runs;
+    }
+
+    function markMatchesV3(runs, movedTiles = []) {
+      const used = Array.from({length: GRID_SIZE}, () => Array(GRID_SIZE).fill(false));
+      let specials = [];
+
+      // 1. Straight 6+ (color bomb)
+      for (const run of runs) {
+        if (run.positions.length >= 6 && !run.positions.some(p => used[p.y][p.x])) {
+          specials.push({type: 'color', run: run.positions, orient: run.orient});
+          run.positions.forEach(p => used[p.y][p.x] = true);
+        }
+      }
+
+      // 2. T/L shapes (bomb)
+      for (const h of runs.filter(r => r.orient === 'h' && r.positions.length >= 3)) {
+        for (const v of runs.filter(r => r.orient === 'v' && r.positions.length >= 3)) {
+          const overlap = h.positions.find(p => v.positions.some(q => q.x === p.x && q.y === p.y));
+          if (!overlap) continue;
+          const uniq = new Map();
+          [...h.positions, ...v.positions].forEach(p => {
+            if (!used[p.y][p.x]) uniq.set(`${p.x},${p.y}`, p);
+          });
+          if (uniq.size >= 5) {
+            specials.push({type: 'bomb', run: [...uniq.values()], pivot: overlap});
+            [...uniq.values()].forEach(p => used[p.y][p.x] = true);
+          }
+        }
+      }
+
+      // 3. Straight 4 (striped)
+      for (const run of runs) {
+        if (run.positions.length === 4 && !run.positions.some(p => used[p.y][p.x])) {
+          specials.push({type: run.orient === 'h' ? 'horizontal' : 'vertical', run: run.positions, orient: run.orient});
+          run.positions.forEach(p => used[p.y][p.x] = true);
+        }
+      }
+
+      // Place specials and mark for removal
+      for (const s of specials) {
+        let pivot = s.pivot ||
+          s.run.find(p => movedTiles.some(m => m.x === p.x && m.y === p.y) && !grid[p.y][p.x].special) ||
+          s.run.find(p => !grid[p.y][p.x].special) ||
+          s.run[Math.floor(s.run.length/2)];
+        const t = grid[pivot.y][pivot.x];
+        if (!t.special) {
+          t.special = s.type;
+          t.matching = false;
+          onSpecialCreated(t);
+        }
+        s.run.forEach(p => {
+          if (p.x !== pivot.x || p.y !== pivot.y) {
+            grid[p.y][p.x].matching = true;
+            whiteFlashes.push({x:p.x,y:p.y,t:0,life:120});
+          }
+        });
+      }
+
+      // Default: mark all remaining run tiles for removal and award points
+      for (const run of runs) {
+        for (const p of run.positions) {
+          if (!used[p.y][p.x]) {
+            const t = grid[p.y][p.x];
+            t.matching = true;
+            whiteFlashes.push({x:p.x, y:p.y, t:0, life:120});
+            if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+            score += 10 + (combo * 2);
+            used[p.y][p.x] = true;
+          }
+        }
+      }
+    }
+            size[i] = size[last]; rot[i] = rot[last];
+            isShard[i] = isShard[last];
+            cr[i] = cr[last]; cg[i] = cg[last]; cb[i] = cb[last];
+          }
+          pCount = last;
+        }
+      }
+    }
+
+    function drawParticles(ctx) {
+      for (let i = 0; i < pCount; i++) {
+        const a = 1 - (life[i] / maxL[i]);
+        const wBias = 1 - a;
+        const r = (cr[i] * (1 - wBias) + 255 * wBias) | 0;
+        const g = (cg[i] * (1 - wBias) + 255 * wBias) | 0;
+        const b = (cb[i] * (1 - wBias) + 255 * wBias) | 0;
+
+        ctx.globalAlpha = Math.max(0, a);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        const s = size[i];
+
+        if (isShard[i]) {
+          ctx.save();
+          ctx.translate(pxs[i], pys[i]);
+          ctx.rotate(rot[i]);
+          ctx.fillRect(-s * 1.5, -0.5, s * 3, 1);
+          ctx.restore();
+        } else {
+          ctx.fillRect(pxs[i] - s * 0.5, pys[i] - s * 0.5, s, s);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // --- SFX (WebAudio) ---
+    let ACtx = null, masterGain = null;
+    function audioCtx() {
+      if (!ACtx) {
+        ACtx = new (window.AudioContext || window.webkitAudioContext)();
+        masterGain = ACtx.createGain();
+        // start silent; ramp to OPTIONS.volume to avoid the first loud pop
+        masterGain.gain.value = 0;
+        masterGain.connect(ACtx.destination);
+
+        const t0 = ACtx.currentTime;
+        const target = (OPTIONS?.volume ?? 0.9);
+        masterGain.gain.cancelScheduledValues(t0);
+        masterGain.gain.setValueAtTime(0, t0);
+        masterGain.gain.linearRampToValueAtTime(target, t0 + 0.25);
+      }
+      return ACtx;
+    }
+    function rampToVolume(target = (OPTIONS?.volume ?? 0.9), seconds = 0.15) {
+      if (!ACtx || !masterGain) return;
+      const t0 = ACtx.currentTime;
+      const cur = masterGain.gain.value;
+      masterGain.gain.cancelScheduledValues(t0);
+      masterGain.gain.setValueAtTime(cur, t0);
+      masterGain.gain.linearRampToValueAtTime(target, t0 + seconds);
+    }
+
+    function duck(db=-3, dur=0.08) {
+      if (!masterGain || !OPTIONS.sfx) return;
+      const ctx = ACtx;
+      const t0 = ctx.currentTime;
+      const cur = masterGain.gain.value;
+      const target = Math.pow(10, db/20) * cur;
+      masterGain.gain.cancelScheduledValues(t0);
+      masterGain.gain.setValueAtTime(cur, t0);
+      masterGain.gain.linearRampToValueAtTime(target, t0 + 0.01);
+      masterGain.gain.linearRampToValueAtTime(cur, t0 + dur);
+    }
+    function beep({freq=440, dur=0.08, type='sine', gain=0.04, rand=0}) {
+      if (!OPTIONS.sfx) return;
+      const ctx = audioCtx();
+      const t0 = ctx.currentTime;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = type;
+      const f = freq * (1 + (Math.random() * 2 - 1) * rand);
+      o.frequency.setValueAtTime(f, t0);
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(masterGain || ctx.destination);
+      o.start(t0);
+      o.stop(t0 + dur + 0.02);
+    }
+    const SFX = {
+      swap:     () => beep({freq: 220, type:'triangle', dur:0.05, gain:0.03, rand:0.02}),
+      invalid:  () => beep({freq: 140, type:'sawtooth', dur:0.08, gain:0.025}),
+      pop:      () => beep({freq: 660, type:'square', dur:0.04, gain:0.02, rand:0.03}),
+      special:  () => { duck(-4, 0.1); beep({freq: 220, type:'sine', dur:0.07, gain:0.04}); setTimeout(()=>beep({freq:440, dur:0.06, gain:0.03, rand:0.01}),40); },
+      colorBomb:() => { duck(-5, 0.15); beep({freq: 200, type:'triangle', dur:0.09, gain:0.05}); setTimeout(()=>beep({freq: 800, dur:0.06, gain:0.03, rand:0.02}),80); },
+      sweepTick:() => beep({freq: 520, type:'square', dur:0.03, gain:0.02}),
+      countdownStage: (stage) => {
+        if (!OPTIONS.sfx) return;
+        const freqMap = {3: 392, 2: 349, 1: 330, 0: 880};
+        const f = freqMap[stage] ?? 440;
+        beep({ freq: f, type: 'sine', dur: 0.08, gain: 0.018, rand: 0.01 });
+      }
+    };
+    resetBtn.addEventListener('click', () => { try { audioCtx().resume().then(()=>rampToVolume()); } catch {} });
+    canvas.addEventListener('pointerdown', () => { try { audioCtx().resume().then(()=>rampToVolume()); } catch {} }, { once:true });
+
+    // --- Graphics (tiles & specials images) ---
+    const tileImages = [];
+    for (let i = 0; i < COLORS.length; i++) {
+      const img = new Image();
+      img.src = `tile_${i}.png`;
+      tileImages.push(img);
+    }
+    const specialImages = {
+      horizontal: (()=>{let i=new Image();i.src="special_horizontal.png";return i;})(),
+      vertical:   (()=>{let i=new Image();i.src="special_vertical.png";return i;})(),
+      bomb:       (()=>{let i=new Image();i.src="special_bomb.png";return i;})(),
+      color:      (()=>{let i=new Image();i.src="special_color.png";return i;})(),
+    };
+
+    class Tile {
+      constructor(color, x, y) {
+        this.color = color;
+        this.x = x; this.y = y;
+        this.px = x * CELL_SIZE; this.py = y * CELL_SIZE + TOPBAR_HEIGHT;
+        this.scale = 1; this.alpha = 1; this.rotation = 0;
+        this.matching = false; this.toRemove = false; this.animProgress = 0;
+        this.targetPy = this.py; this.special = null; this.highlight = false; this.triggered = false;
+        this.spawnScale = 1; this.nudgeX = 0; this.nudgeY = 0; this.nudgeT = 0;
+      }
+      draw() {
+        const size = CELL_SIZE * this.scale * this.spawnScale;
+        ctx.save();
+        ctx.globalAlpha = this.alpha;
+        ctx.translate(this.px + CELL_SIZE / 2 + this.nudgeX, this.py + CELL_SIZE / 2 + this.nudgeY);
+        ctx.rotate(this.rotation);
+        let imgDrawn = false;
+        if (this.special && specialImages[this.special]?.complete && specialImages[this.special]?.naturalWidth > 0) {
+          ctx.drawImage(specialImages[this.special], -size/2, -size/2, size, size); imgDrawn = true;
+        } else if (!this.special) {
+          const colorIdx = COLORS.indexOf(this.color);
+          const img = tileImages[colorIdx];
+          if (img && img.complete && img.naturalWidth > 0) { ctx.drawImage(img, -size/2, -size/2, size, size); imgDrawn = true; }
+        }
+        if (!imgDrawn) {
+          ctx.fillStyle = this.color;
+          ctx.fillRect(-size / 2, -size / 2, size, size);
+          if (this.special) {
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+            if (this.special === 'horizontal') { ctx.beginPath(); ctx.moveTo(-size/2,0); ctx.lineTo(size/2,0); ctx.stroke(); }
+            else if (this.special === 'vertical') { ctx.beginPath(); ctx.moveTo(0,-size/2); ctx.lineTo(0,size/2); ctx.stroke(); }
+            else if (this.special === 'bomb') { ctx.beginPath(); ctx.arc(0,0,size/4,0,2*Math.PI); ctx.stroke(); }
+            else if (this.special === 'color') { ctx.beginPath(); ctx.moveTo(-size/2,-size/2); ctx.lineTo(size/2,size/2); ctx.moveTo(size/2,-size/2); ctx.lineTo(-size/2,size/2); ctx.stroke(); }
+          }
+        }
+        if (this.highlight) {
+          ctx.save(); ctx.lineWidth = 5; ctx.strokeStyle = "#ffeb3b"; ctx.globalAlpha = 0.75;
+          ctx.strokeRect(-size/2+2, -size/2+2, size-4, size-4); ctx.restore();
+        }
+        ctx.restore();
+      }
+      update(dt=0) {
+        if (!swapState && this.py < this.targetPy) { this.py = Math.min(this.py + FALL_SPEED, this.targetPy); }
+        if (this.spawnScale < 1) { this.spawnScale = Math.min(1, this.spawnScale + 0.12); }
+        if (this.nudgeT > 0) {
+          this.nudgeT -= dt; this.nudgeX *= 0.86; this.nudgeY *= 0.86; if (this.nudgeT <= 0) { this.nudgeX = this.nudgeY = 0; }
+        }
+        if (this.matching) {
+          this.animProgress += MATCH_ANIM_SPEED;
+          const t = Math.min(this.animProgress, 1);
+          this.scale = 1 + Math.sin(t * Math.PI) * 0.8;
+          this.rotation = t * 2 * Math.PI; this.alpha = 1 - t;
+          if (this.animProgress >= 1) { this.matching = false; return 'remove'; }
+        }
+        return null;
+      }
+    }
+
+    // Toasts
+    const toasts = []; // {text,x,y,t,life}
+    function addToast(text, x, y, life=700) { toasts.push({ text, x, y, t: 0, life }); }
+    function drawToasts(dt) {
+      for (let i = toasts.length-1; i >= 0; i--) {
+        const o = toasts[i]; o.t += dt;
+        const p = Math.min(1, o.t / o.life);
+        const alpha = (p < 0.2) ? (p/0.2) : (1 - Math.max(0, (p-0.7)/0.3));
+        const dy = -30 * p;
+        ctx.save(); ctx.globalAlpha = Math.max(0, alpha); ctx.fillStyle = '#fff';
+        ctx.font = 'bold 18px Segoe UI, Arial'; ctx.textAlign = 'center'; ctx.fillText(o.text, o.x, o.y + dy);
+        ctx.restore();
+        if (o.t >= o.life) { toasts.splice(i,1); }
+      }
+    }
+
+    // --- Special Combo Detection ---
+    function getSpecialComboType(a, b) {
+      const set = new Set([a.special, b.special]);
+      if (
+        (set.has('horizontal') && set.has('vertical')) ||
+        (a.special === 'horizontal' && b.special === 'horizontal') ||
+        (a.special === 'vertical' && b.special === 'vertical')
+      ) return 'plus';
+      if ((set.has('bomb') && set.has('horizontal')) || (set.has('bomb') && set.has('vertical'))) {
+        return (a.special === 'horizontal' || b.special === 'horizontal') ? 'double_horizontal' : 'double_vertical';
+      }
+      if (set.has('color') && (set.has('horizontal') || set.has('vertical') || set.has('bomb'))) {
+        return (a.special === 'color') ? b.special : a.special;
+      }
+      return null;
+    }
+
+    // Combo handlers (plus/double rows/cols) + color + double color bomb
+    function highlightPlusCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let i = 0; i < GRID_SIZE; i++) { grid[y][i].highlight = true; grid[i][x].highlight = true; }
+      draw();
+    }
+    function triggerPlusCombo(x, y, a, b) {
+      highlightPlusCombo(x, y);
+      addShake(4); globalPulse = Math.min(1, globalPulse + 0.5);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        [a, b].forEach(pos => { let t = grid[pos.y]?.[pos.x]; if (t) { t.matching = true; t.animProgress = 0; t.special = null; } });
+        const alreadyQueued = new Set();
+        for (let i = 0; i < GRID_SIZE; i++) {
+          let rowT = grid[y][i]; let colT = grid[i][x];
+          [rowT, colT].forEach(t => {
+            if (t && !t.matching) {
+              const key = t.y * 100 + t.x;
+              if (!alreadyQueued.has(key)) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true; t.animProgress = 0; score += combo; alreadyQueued.add(key);
+                whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+              }
+            }
+          });
+        }
+      }, 50);
+    }
+    function highlightDoubleHorizontalCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let dy = -1; dy <= 1; dy++) {
+        let row = y + dy; if (row >= 0 && row < GRID_SIZE) for (let col = 0; col < GRID_SIZE; col++) grid[row][col].highlight = true;
+      }
+      draw();
+    }
+    function triggerDoubleHorizontalCombo(x, y, a, b) {
+      highlightDoubleHorizontalCombo(x, y);
+      addShake(5); globalPulse = Math.min(1, globalPulse + 0.6);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        [a, b].forEach(pos => { let t = grid[pos.y]?.[pos.x]; if (t) { t.matching = true; t.animProgress = 0; t.special = null; } });
+        for (let dy = -1; dy <= 1; dy++) {
+          let row = y + dy;
+          if (row >= 0 && row < GRID_SIZE) {
+            for (let col = 0; col < GRID_SIZE; col++) {
+              let t = grid[row][col];
+              if (t && !t.matching) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true; t.animProgress = 0; score += combo; whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+              }
+            }
+          }
+        }
+      }, 50);
+    }
+    function highlightDoubleVerticalCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let dx = -1; dx <= 1; dx++) {
+        let col = x + dx; if (col >= 0 && col < GRID_SIZE) for (let row = 0; row < GRID_SIZE; row++) grid[row][col].highlight = true;
+      }
+      draw();
+    }
+    function triggerDoubleVerticalCombo(x, y, a, b) {
+      highlightDoubleVerticalCombo(x, y);
+      addShake(5); globalPulse = Math.min(1, globalPulse + 0.6);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        [a, b].forEach(pos => { let t = grid[pos.y]?.[pos.x]; if (t) { t.matching = true; t.animProgress = 0; t.special = null; } });
+        for (let dx = -1; dx <= 1; dx++) {
+          let col = x + dx;
+          if (col >= 0 && col < GRID_SIZE) {
+            for (let row = 0; row < GRID_SIZE; row++) {
+              let t = grid[row][col];
+              if (t && !t.matching) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true; t.animProgress = 0; score += combo; whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+              }
+            }
+          }
+        }
+      }, 50);
+    }
+
+    // Color Bomb + Color Bomb => sweep entire board row-by-row
+    function triggerDoubleColorBomb(tileA, tileB) {
+      highlightingSpecial = true; animating = true;
+      SFX.colorBomb(); addShake(8); globalPulse = 1;
+      [tileA, tileB].forEach(t => { if (!t) return; t.matching = true; t.animProgress = 0; t.special = null; });
+
+      let row = 0;
+      function sweepNextRow() {
+        if (row >= GRID_SIZE) { highlightingSpecial = false; requestAnimationFrame(matchStep); return; }
+        for (let x = 0; x < GRID_SIZE; x++) { const t = grid[row][x]; if (t) t.highlight = true; }
+        draw(); SFX.sweepTick(); addShake(2);
+        setTimeout(() => {
+          for (let x = 0; x < GRID_SIZE; x++) {
+            const t = grid[row][x];
+            if (!t || t.matching) continue;
+            if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+            t.matching = true; t.animProgress = 0; whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 }); score += Math.max(1, combo + 1);
+            if (x === (GRID_SIZE >> 1)) {
+              const midX = x * CELL_SIZE + CELL_SIZE * 0.5;
+              const midY = TOPBAR_HEIGHT + row * CELL_SIZE + CELL_SIZE * 0.5;
+              spawnParticles(midX, midY, '#ffffff', 24);
+            }
+          }
+          for (let x = 0; x < GRID_SIZE; x++) { const t = grid[row][x]; if (t) t.highlight = false; }
+          draw(); row++; setTimeout(sweepNextRow, 70);
+        }, 90);
+      }
+      setTimeout(sweepNextRow, 60);
+    }
+
+    // --- Color Bomb Combo: spread and sequentially trigger ---
+    function highlightColorBombCombo(color) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) if (grid[y][x].color === color) grid[y][x].highlight = true;
+      draw();
+    }
+    function triggerColorBombCombo(colorBombTile, otherTile) {
+      const targetColor = otherTile.color; const specialType = otherTile.special;
+      highlightColorBombCombo(targetColor); SFX.colorBomb(); globalPulse = Math.min(1, globalPulse + 0.7);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false); highlightingSpecial = false;
+        colorBombTile.matching = true; colorBombTile.animProgress = 0; colorBombTile.special = null;
+        otherTile.matching = true;     otherTile.animProgress     = 0; otherTile.special     = null;
+
+        let specialTiles = [];
+        for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+          let t = grid[y][x];
+          if (t.color === targetColor && t !== colorBombTile && t !== otherTile) {
+            if (t.special) {
+              t.triggered = false; specialsToTrigger.push(t);
+            } else {
+              t.special = specialType; t.triggered = false; specialTiles.push(t); onSpecialCreated(t);
+            }
+          }
+        }
+        draw();
+
+        animating = true; let i = 0;
+        function triggerNextSpecial() {
+          if (i >= specialTiles.length) { requestAnimationFrame(matchStep); return; }
+          if (highlightingSpecial) { setTimeout(triggerNextSpecial, 12); return; }
+          const st = specialTiles[i++]; if (!st || st.matching) { setTimeout(triggerNextSpecial, 0); return; }
+          st.highlight = true; draw();
+          setTimeout(() => { st.highlight = false; triggerSpecial(st); setTimeout(triggerNextSpecial, 60); }, 40);
+        }
+        setTimeout(triggerNextSpecial, 60);
+      }, 120);
+    }
+
+    // --- Init / flow ---
+    function startGame() {
+      grid = []; score = 0; combo = 0; comboPulse = 0; timeUp = false; hasStarted = false; isPaused = false;
+      specialsToTrigger = []; whiteFlashes = []; stripedPreview = null; globalPulse = 0;
+      if (timerInterval) clearInterval(timerInterval);
+      timer = 60;
+
+      for (let y = 0; y < GRID_SIZE; y++) {
+        const row = [];
+        for (let x = 0; x < GRID_SIZE; x++) row.push(new Tile(randomColor(), x, y));
+        grid.push(row);
+      }
+      clearInitialMatches();
+      beginCountdown(); // 3-2-1-Go
+      draw();
+      resetBtn.textContent = "Restart";
+    }
+
+    function countdownTick() {
+      if (countdown > 0 && !hasStarted && !timeUp) {
+        const now = performance.now();
+        const elapsed = (now - countdownStart) / 1000;
+        let stage = 3 - Math.floor(elapsed); // 3..2..1..0
+        if (stage < 0) stage = 0;
+
+        if (lastCountdownStage !== stage) {
+          lastCountdownStage = stage;
+          SFX.countdownStage(stage);
+        }
+
+        draw();
+
+        if (elapsed >= 3) {
+          countdown = 0;
+          hasStarted = true;
+          lastCountdownStage = null;
+          try { audioCtx().resume().then(()=>rampToVolume()); } catch {}
+          startTimer();
+          draw();
+          return;
+        }
+        countdownRAF = requestAnimationFrame(countdownTick);
+      } else if (countdownRAF) {
+        cancelAnimationFrame(countdownRAF);
+        countdownRAF = null;
+      }
+    }
+
+    function beginCountdown() {
+      countdown = 3;
+      lastCountdownStage = null;
+      countdownStart = performance.now();
+      try { audioCtx().resume().then(()=>rampToVolume()); } catch {}
+      countdownTick();
+    }
+
+    function startTimer() {
+      if (timerInterval) clearInterval(timerInterval);
+      hasStarted = true;
+      timerInterval = setInterval(() => {
+        if (animating || isPaused) return;
+        timer--;
+        if (timer <= 0) { timer = 0; timeUp = true; clearInterval(timerInterval); hasStarted = false; updateBest(); }
+        draw();
+      }, 1000);
+    }
+    function updateBest() {
+      if (score > bestScore) {
+        bestScore = score; localStorage.setItem('bestScore', String(bestScore));
+      }
+    }
+
+    function randomColor() { return COLORS[Math.floor(Math.random() * COLORS.length)]; }
+    function clearInitialMatches() {
+      let gs = getGroups();
+      while (gs.length) {
+        gs.forEach(g => g.positions.forEach(p => grid[p.y][p.x].color = randomColor()));
+        gs = getGroups();
+      }
+    }
+
+    // --- Drawing / UI ---
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const now = performance.now();
+      const dt = now - lastFrameTime; lastFrameTime = now;
+      avgDt = avgDt * 0.9 + dt * 0.1;
+
+      // HUD (no shake)
+      ctx.save();
+      ctx.globalAlpha = 0.96;
+      ctx.fillStyle = "#1a1a1a";
+      ctx.fillRect(0,0,canvas.width,TOPBAR_HEIGHT);
+      ctx.globalAlpha = 1;
+
+      // Combo pulse anim
+      comboPulse = Math.max(0, comboPulse - dt / 140);
+      const pulseS = 1 + 0.15 * Math.sin((1 - comboPulse) * Math.PI) * Math.max(0, comboPulse);
+
+      ctx.save();
+      ctx.font = `bold 26px Segoe UI, Arial, sans-serif`;
+      ctx.fillStyle = '#fff'; ctx.textAlign = 'left';
+      ctx.fillText(`Score: ${score}`, 24, 40);
+
+      ctx.textAlign = 'center';
+      ctx.save(); ctx.translate(CANVAS_W/2, 40); ctx.scale(pulseS, pulseS);
+      ctx.fillStyle = combo > 1 ? '#f6d06f' : '#fff';
+      ctx.fillText(`Combo: x${combo>1?combo:1}`, 0, 0);
+      ctx.restore();
+
+      ctx.textAlign = 'right';
+      ctx.fillStyle = timer <= 10 ? '#e74c3c' : '#fff';
+      ctx.fillText(`Time: ${timer}`, CANVAS_W-24, 40);
+
+      // Best score preview
+      ctx.textAlign = 'left'; ctx.fillStyle = '#9aa'; ctx.font = 'bold 14px Segoe UI';
+      ctx.fillText(`Best: ${bestScore}`, 24, 58);
+
+      ctx.restore();
+
+      // Shake decay
+      const decay = Math.pow(0.88, dt / 16.67);
+      shakeAmp *= decay;
+      const sx = (Math.random() * 2 - 1) * shakeAmp;
+      const sy = (Math.random() * 2 - 1) * shakeAmp;
+      currentShakeX = sx; currentShakeY = sy;
+
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      // Tiles
+      grid.flat().forEach(t => t.draw());
+
+      // Flashes
+      for (let i = whiteFlashes.length-1; i >= 0; i--) {
+        const f = whiteFlashes[i];
+        f.t += dt;
+        const p = Math.min(1, f.t / f.life);
+        const a = (p < 0.3) ? (p/0.3) : (1 - (p-0.3)/0.7);
+        const x = f.x * CELL_SIZE, y = f.y * CELL_SIZE + TOPBAR_HEIGHT;
+        ctx.save(); ctx.globalAlpha = Math.max(0, a) * 0.9; ctx.strokeStyle = "#fff"; ctx.lineWidth = 3;
+        ctx.strokeRect(x+2, y+2, CELL_SIZE-4, CELL_SIZE-4); ctx.restore();
+        if (f.t >= f.life) whiteFlashes.splice(i,1);
+      }
+
+      // Striped preview
+      if (stripedPreview) {
+        const { type, idx, start, dur } = stripedPreview;
+        const t = (now - start) / dur;
+        if (t <= 1) {
+          ctx.save(); ctx.globalAlpha = 0.8; ctx.fillStyle = '#ffffff';
+          if (type === 'h') {
+            const y = TOPBAR_HEIGHT + idx * CELL_SIZE + CELL_SIZE/2 - 1;
+            const w = CANVAS_W * t; ctx.fillRect(0, y, w, 2);
+          } else {
+            const x = idx * CELL_SIZE + CELL_SIZE/2 - 1;
+            const h = (CANVAS_H - TOPBAR_HEIGHT) * t; ctx.fillRect(x, TOPBAR_HEIGHT, 2, h);
+          }
+          ctx.restore();
+        } else stripedPreview = null;
+      }
+
+      // Particles
+      const budgetScale = Math.max(0.3, Math.min(1.0, 16.67 / avgDt));
+      particleBudget = Math.floor(PARTICLE_BASE_BUDGET * budgetScale);
+      updateParticles(dt);
+      drawParticles(ctx);
+
+      // Drag preview highlight
+      if (dragStart && !swapState && !timeUp && hasStarted && !isPaused) {
+        ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = "#fff";
+        ctx.fillRect(dragStart.x * CELL_SIZE, dragStart.y * CELL_SIZE + TOPBAR_HEIGHT, CELL_SIZE, CELL_SIZE);
+        if (dragPreviewTarget) { ctx.globalAlpha = 0.22; ctx.fillRect(dragPreviewTarget.x * CELL_SIZE, dragPreviewTarget.y * CELL_SIZE + TOPBAR_HEIGHT, CELL_SIZE, CELL_SIZE); }
+        ctx.restore();
+      }
+
+      ctx.restore(); // end shaken playfield
+
+      // Vignette pulse
+      if (globalPulse > 0) {
+        globalPulse = Math.max(0, globalPulse - dt/300);
+        const g = ctx.createRadialGradient(CANVAS_W/2, CANVAS_H/2, 10, CANVAS_W/2, CANVAS_H/2, Math.max(CANVAS_W, CANVAS_H)/1.1);
+        g.addColorStop(0, `rgba(0,0,0,${0.0 * globalPulse})`);
+        g.addColorStop(1, `rgba(0,0,0,${0.25 * globalPulse})`);
+        ctx.save(); ctx.fillStyle = g; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.restore();
+      }
+
+      // Toasts
+      drawToasts(dt);
+
+      // Debug overlay / Performance HUD
+      if (debugMode) {
+        ctx.save();
+        ctx.fillStyle = "#fff"; ctx.font = "bold 14px Segoe UI, Arial";
+        const fps = (1000 / avgDt).toFixed(0);
+        const lines = [
+          "DEBUG MODE",
+          `FPS: ${fps}, avgDt: ${avgDt.toFixed(1)}ms`,
+          `Particles: ${pCount}/${MAX_PARTICLES}`,
+          `Specials queue: ${specialsToTrigger.length}`,
+        ];
+        lines.forEach((l, i) => ctx.fillText(l, CANVAS_W - 220, 18 + i * 16));
+        ctx.restore();
+        drawDebugSelector();
+      }
+
+      // Pause overlay (drawn in-canvas, buttons are HTML)
+      if (isPaused && !timeUp) {
+        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = "#111";
+        ctx.fillRect(0, TOPBAR_HEIGHT, canvas.width, canvas.height - TOPBAR_HEIGHT);
+        ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+        ctx.font = "bold 56px Segoe UI, Arial, sans-serif"; ctx.fillText("Paused", CANVAS_W/2, CANVAS_H/2 - 20);
+        ctx.font = "18px Segoe UI"; ctx.fillText("Press Esc to resume", CANVAS_W/2, CANVAS_H/2 + 18);
+        ctx.restore();
+      }
+
+      // Countdown overlay
+      if (!hasStarted && !timeUp && countdown > 0) {
+        const elapsed = (performance.now() - countdownStart) / 1000;
+        let stage = Math.floor(elapsed);
+        let display = 3 - stage;
+        if (display <= 0) display = "GO!";
+        ctx.save(); ctx.globalAlpha = 0.85; ctx.fillStyle = "#111";
+        ctx.fillRect(0, TOPBAR_HEIGHT, canvas.width, canvas.height - TOPBAR_HEIGHT);
+        ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+        ctx.font = "bold 80px Segoe UI, Arial"; ctx.fillText(display, CANVAS_W/2, CANVAS_H/2 + 20);
+        ctx.restore();
+      }
+
+      // Time up overlay
+      if (timeUp) {
+        ctx.save(); ctx.globalAlpha = 0.8; ctx.fillStyle = "#111";
+        ctx.fillRect(0, TOPBAR_HEIGHT, canvas.width, canvas.height - TOPBAR_HEIGHT);
+        ctx.globalAlpha = 1; ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+        ctx.font = "bold 56px Segoe UI, Arial, sans-serif"; ctx.fillText("Time's Up!", CANVAS_W / 2, CANVAS_H / 2 - 40);
+        ctx.font = "bold 32px Segoe UI, Arial, sans-serif"; ctx.fillText(`Score: ${score}`, CANVAS_W / 2, CANVAS_H / 2 + 10);
+        ctx.font = "22px Segoe UI"; ctx.fillText(`Best: ${bestScore}`, CANVAS_W / 2, CANVAS_H / 2 + 42);
+        ctx.font = "18px Segoe UI"; ctx.fillText("Press Restart or [R]", CANVAS_W / 2, CANVAS_H / 2 + 78);
+        ctx.restore();
+        resetBtn.textContent = "Restart";
+      }
+    }
+
+    // Debug selector UI
+    function drawDebugSelector() {
+      if (!debugSelector) return;
+      ctx.save(); ctx.globalAlpha = 0.97; ctx.fillStyle = "#181a2a"; ctx.fillRect(0, 0, CANVAS_W, 32 + 32);
+      COLORS.forEach((c, i) => { ctx.fillStyle = c; ctx.fillRect(8 + i * 42, 4, 36, 24); ctx.strokeStyle = '#fff'; ctx.strokeRect(8 + i * 42, 4, 36, 24); });
+      const specials = ['none', 'horizontal', 'vertical', 'bomb', 'color'];
+      specials.forEach((s, i) => {
+        ctx.fillStyle = "#555"; ctx.fillRect(8 + i * 60, 36, 54, 24); ctx.strokeStyle = '#fff'; ctx.strokeRect(8 + i * 60, 36, 54, 24);
+        ctx.fillStyle = "#fff"; ctx.font = "14px sans-serif"; ctx.fillText(s, 14 + i * 60, 53);
+      });
+      ctx.restore();
+    }
+
+    // --- Match Logic helpers ---
+    function getCell(e) {
+      const r = canvas.getBoundingClientRect();
+      const localX = (e.clientX - r.left) - currentShakeX;
+      const localY = (e.clientY - r.top) - currentShakeY - TOPBAR_HEIGHT;
+      const x = Math.floor(localX / CELL_SIZE);
+      const y = Math.floor(localY / CELL_SIZE);
+      return { x, y };
+    }
+    function getCellFromClient(clientX, clientY) {
+      const r = canvas.getBoundingClientRect();
+      const localX = (clientX - r.left) - currentShakeX;
+      const localY = (clientY - r.top) - currentShakeY - TOPBAR_HEIGHT;
+      const x = Math.floor(localX / CELL_SIZE);
+      const y = Math.floor(localY / CELL_SIZE);
+      return { x, y };
+    }
+    function isAdj(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1; }
+
+  function getGroups() {
+  const groups = [];
+  // Horizontal
+  for (let y = 0; y < GRID_SIZE; y++) {
+    let run = [];
+    for (let x = 0; x < GRID_SIZE; x++) {
+      if (run.length === 0 || grid[y][x].color === grid[y][run[0]].color) {
+        run.push(x);
+      } else {
+        if (run.length >= 3) {
+          groups.push({
+            positions: run.map(rx => ({ x: rx, y })),
+            orient: 'h'
+          });
+        }
+        run = [x];
+      }
+    }
+    if (run.length >= 3) {
+      groups.push({
+        positions: run.map(rx => ({ x: rx, y })),
+        orient: 'h'
+      });
+    }
+  }
+  // Vertical
+  for (let x = 0; x < GRID_SIZE; x++) {
+    let run = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      if (run.length === 0 || grid[y][x].color === grid[run[0]][x].color) {
+        run.push(y);
+      } else {
+        if (run.length >= 3) {
+          groups.push({
+            positions: run.map(ry => ({ x, y: ry })),
+            orient: 'v'
+          });
+        }
+        run = [y];
+      }
+    }
+    if (run.length >= 3) {
+      groups.push({
+        positions: run.map(ry => ({ x, y: ry })),
+        orient: 'v'
+      });
+    }
+  }
+  return groups;
+}
+
+    // toast + preview when a special is created
+    function onSpecialCreated(tile) {
+      const cx = tile.x * CELL_SIZE + CELL_SIZE/2;
+      const cy = TOPBAR_HEIGHT + tile.y * CELL_SIZE + CELL_SIZE/2;
+      if (tile.special === 'horizontal') { addToast('Striped!', cx, cy - 28); stripedPreview = { type:'h', idx: tile.y, start: performance.now(), dur: 200 }; }
+      else if (tile.special === 'vertical') { addToast('Striped!', cx, cy - 28); stripedPreview = { type:'v', idx: tile.x, start: performance.now(), dur: 200 }; }
+      else if (tile.special === 'bomb') { addToast('Bomb!', cx, cy - 28); }
+      else if (tile.special === 'color') { addToast('Color Bomb!', cx, cy - 28); }
+      whiteFlashes.push({ x: tile.x, y: tile.y, t: 0, life: 160 });
+    }
+
+// === Priority: (1) straight 6+ ⇒ COLOR BOMB  (2) 5 in L/T ⇒ BOMB
+//                 (3) straight 5 ⇒ BOMB       (4) straight 4 ⇒ STRIPED
+//                 (5) clear all 3+ ===
+function markMatchesV3(matchGrid, movedTiles = []) {
+  const used = Array.from({length: GRID_SIZE}, () => Array(GRID_SIZE).fill(false));
+  let specials = [];
+
+  // 1. Find all straight 6+ runs directly from the grid (not matchGrid)
+  // Horizontal 6+
+  for (let y = 0; y < GRID_SIZE; y++) {
+    let run = [];
+    let lastColor = null;
+    for (let x = 0; x < GRID_SIZE; x++) {
+      const t = grid[y][x];
+      if (!t) continue;
+      if (lastColor === t.color) {
+        run.push({x, y});
+      } else {
+        if (run.length >= 6) {
+          specials.push({type: 'color', run: [...run]});
+          run.forEach(p => used[p.y][p.x] = true);
+        }
+        run = [{x, y}];
+        lastColor = t.color;
+      }
+    }
+    if (run.length >= 6) {
+      specials.push({type: 'color', run: [...run]});
+      run.forEach(p => used[p.y][p.x] = true);
+    }
+  }
+  // Vertical 6+
+  for (let x = 0; x < GRID_SIZE; x++) {
+    let run = [];
+    let lastColor = null;
+    for (let y = 0; y < GRID_SIZE; y++) {
+      const t = grid[y][x];
+      if (!t) continue;
+      if (lastColor === t.color) {
+        run.push({x, y});
+      } else {
+        if (run.length >= 6) {
+          specials.push({type: 'color', run: [...run]});
+          run.forEach(p => used[p.y][p.x] = true);
+        }
+        run = [{x, y}];
+        lastColor = t.color;
+      }
+    }
+    if (run.length >= 6) {
+      specials.push({type: 'color', run: [...run]});
+      run.forEach(p => used[p.y][p.x] = true);
+    }
+  }
+
+  // 2. Now use matchGrid for T/L and striped detection, skipping used
+  // T/L shapes (5+ unique tiles, overlap of h+v runs of 3+), skip used
+  for (let y = 0; y < GRID_SIZE; y++) {
+    for (let x = 0; x < GRID_SIZE; x++) {
+      if (!matchGrid[y][x] || used[y][x]) continue;
+      let hRun = [{x, y}], vRun = [{x, y}];
+      for (let dx = x-1; dx >= 0 && matchGrid[y][dx] && !used[y][dx]; dx--) hRun.unshift({x:dx, y});
+      for (let dx = x+1; dx < GRID_SIZE && matchGrid[y][dx] && !used[y][dx]; dx++) hRun.push({x:dx, y});
+      for (let dy = y-1; dy >= 0 && matchGrid[dy][x] && !used[dy][x]; dy--) vRun.unshift({x, y:dy});
+      for (let dy = y+1; dy < GRID_SIZE && matchGrid[dy][x] && !used[dy][x]; dy++) vRun.push({x, y:dy});
+      if (hRun.length >= 3 && vRun.length >= 3) {
+        const uniq = new Map();
+        [...hRun, ...vRun].forEach(p => uniq.set(`${p.x},${p.y}`, p));
+        if (uniq.size >= 5) {
+          specials.push({type: 'bomb', run: [...uniq.values()], pivot: {x, y}});
+          [...uniq.values()].forEach(p => used[p.y][p.x] = true);
+        }
+      }
+    }
+  }
+
+  // 3. Find all straight 4 (horizontal and vertical), skip used
+  // Horizontal 4
+  for (let y = 0; y < GRID_SIZE; y++) {
+    let run = [];
+    for (let x = 0; x < GRID_SIZE; x++) {
+      if (matchGrid[y][x] && !used[y][x]) run.push({x, y});
+      else {
+        if (run.length === 4) {
+          specials.push({type: 'horizontal', run: [...run]});
+          run.forEach(p => used[p.y][p.x] = true);
+        }
+        run = [];
+      }
+    }
+    if (run.length === 4) {
+      specials.push({type: 'horizontal', run: [...run]});
+      run.forEach(p => used[p.y][p.x] = true);
+    }
+  }
+  // Vertical 4
+  for (let x = 0; x < GRID_SIZE; x++) {
+    let run = [];
+    for (let y = 0; y < GRID_SIZE; y++) {
+      if (matchGrid[y][x] && !used[y][x]) run.push({x, y});
+      else {
+        if (run.length === 4) {
+          specials.push({type: 'vertical', run: [...run]});
+          run.forEach(p => used[p.y][p.x] = true);
+        }
+        run = [];
+      }
+    }
+    if (run.length === 4) {
+      specials.push({type: 'vertical', run: [...run]});
+      run.forEach(p => used[p.y][p.x] = true);
+    }
+  }
+
+  // --- Place specials and mark for removal ---
+  for (const s of specials) {
+    let pivot = s.pivot ||
+      s.run.find(p => movedTiles.some(m => m.x === p.x && m.y === p.y) && !grid[p.y][p.x].special) ||
+      s.run.find(p => !grid[p.y][p.x].special) ||
+      s.run[Math.floor(s.run.length/2)];
+    const t = grid[pivot.y][pivot.x];
+    if (!t.special) {
+      t.special = s.type;
+      t.matching = false;
+      onSpecialCreated(t);
+    }
+    s.run.forEach(p => {
+      if (p.x !== pivot.x || p.y !== pivot.y) {
+        grid[p.y][p.x].matching = true;
+        whiteFlashes.push({x:p.x,y:p.y,t:0,life:120});
+      }
+    });
+  }
+
+  // 4. Default: mark all remaining matched tiles for removal and award points
+  for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+    if (matchGrid[y][x] && !used[y][x]) {
+      const t = grid[y][x];
+      t.matching = true;
+      whiteFlashes.push({x, y, t:0, life:120});
+      if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+      score += 10 + (combo * 2);
+    }
+  }
+}
+    function getMatchGrid() {
+      // Returns a 2D array of booleans: true if matched
+      const matched = Array.from({length: GRID_SIZE}, () => Array(GRID_SIZE).fill(false));
+      // Horizontal
+      for (let y = 0; y < GRID_SIZE; y++) {
+        let run = 1;
+        for (let x = 1; x < GRID_SIZE; x++) {
+          if (grid[y][x].color === grid[y][x-1].color) {
+            run++;
+          } else {
+            if (run >= 3) for (let k = 0; k < run; k++) matched[y][x-1-k] = true;
+            run = 1;
+          }
+        }
+        if (run >= 3) for (let k = 0; k < run; k++) matched[y][GRID_SIZE-1-k] = true;
+      }
+      // Vertical
+      for (let x = 0; x < GRID_SIZE; x++) {
+        let run = 1;
+        for (let y = 1; y < GRID_SIZE; y++) {
+          if (grid[y][x].color === grid[y-1][x].color) {
+            run++;
+          } else {
+            if (run >= 3) for (let k = 0; k < run; k++) matched[y-1-k][x] = true;
+            run = 1;
+          }
+        }
+        if (run >= 3) for (let k = 0; k < run; k++) matched[GRID_SIZE-1-k][x] = true;
+      }
+      return matched;
+    }
+
+    function highlightSpecialArea(tile) {
+      grid.flat().forEach(t => t.highlight = false);
+      const type = tile.special;
+      if (type === 'horizontal') { for (let x = 0; x < GRID_SIZE; x++) grid[tile.y][x].highlight = true; }
+      else if (type === 'vertical') { for (let y = 0; y < GRID_SIZE; y++) grid[y][tile.x].highlight = true; }
+      else if (type === 'bomb') { for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) { const X = tile.x + dx, Y = tile.y + dy; if (grid[Y]?.[X]) grid[Y][X].highlight = true; } }
+      else if (type === 'color') { const c = tile.color; for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) if (grid[y][x].color === c) grid[y][x].highlight = true; }
+      draw();
+    }
+
+    function triggerSpecial(tile) {
+      if (tile.triggered || highlightingSpecial) return;
+      tile.triggered = true; highlightingSpecial = true; combo++; comboPulse = 1; SFX.special();
+
+      if (tile.special === 'bomb') addShake(6);
+      else if (tile.special === 'horizontal' || tile.special === 'vertical') addShake(3);
+            else if (tile.special === 'color') addShake(2);
+
+      highlightSpecialArea(tile);
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        tile.matching = true;
+        tile.animProgress = 0;
+
+        const type = tile.special;
+        if (type === 'horizontal') {
+          for (let x = 0; x < GRID_SIZE; x++) {
+            const t = grid[tile.y][x];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        } else if (type === 'vertical') {
+          for (let y = 0; y < GRID_SIZE; y++) {
+            const t = grid[y][tile.x];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        } else if (type === 'bomb') {
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const X = tile.x + dx, Y = tile.y + dy;
+            const t = grid[Y]?.[X];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        } else if (type === 'color') {
+          const c = tile.color;
+          for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+            const t = grid[y][x];
+            if (t.color === c && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        }
+      }, 50);
+    }
+
+    function resetPos() {
+      grid.flat().forEach(t => {
+        t.px = t.x * CELL_SIZE;
+        t.py = t.y * CELL_SIZE + TOPBAR_HEIGHT;
+        t.nudgeX = 0; t.nudgeY = 0; t.nudgeT = 0;
+        t.rotation = 0; t.scale = 1; t.alpha = 1;
+        t.spawnScale = Math.max(1, t.spawnScale);
+      });
+    }
+
+    function startSwap(a, b) {
+      if (!hasStarted || isPaused) return;
+      const aTile = grid[a.y][a.x];
+      const bTile = grid[b.y][b.x];
+      swapState = { aTile, bTile, a, b, progress: 0, rev: false, dir: (b.x !== a.x ? 'horizontal' : 'vertical') };
+      SFX.swap();
+      animating = true;
+      requestAnimationFrame(swapStep);
+    }
+
+    function swapStep() {
+      const s = swapState;
+      s.progress = Math.min(s.progress + SWAP_SPEED, 1);
+      const ax = s.a.x * CELL_SIZE, ay = s.a.y * CELL_SIZE + TOPBAR_HEIGHT;
+      const bx = s.b.x * CELL_SIZE, by = s.b.y * CELL_SIZE + TOPBAR_HEIGHT;
+      s.aTile.px = ax + (bx - ax) * s.progress;
+      s.aTile.py = ay + (by - ay) * s.progress;
+      s.bTile.px = bx + (ax - bx) * s.progress;
+      s.bTile.py = by + (ay - by) * s.progress;
+      draw();
+      if (s.progress < 1) return requestAnimationFrame(swapStep);
+
+      const aTile = s.aTile, bTile = s.bTile;
+
+      // Color-bomb combos
+      if (aTile.special === 'color' && bTile.special === 'color') {
+        triggerDoubleColorBomb(aTile, bTile);
+        resetPos(); swapState = null; return;
+      }
+      if (aTile.special === 'color' && bTile.special && bTile.special !== 'color') {
+        triggerColorBombCombo(aTile, bTile);
+        resetPos(); swapState = null; requestAnimationFrame(matchStep); return;
+      }
+      if (bTile.special === 'color' && aTile.special && aTile.special !== 'color') {
+        triggerColorBombCombo(bTile, aTile);
+        resetPos(); swapState = null; requestAnimationFrame(matchStep); return;
+      }
+
+      // Line/bomb special combos
+      const comboType = getSpecialComboType(aTile, bTile);
+      if (comboType === 'plus') {
+        const cx = s.b.x, cy = s.b.y;
+        triggerPlusCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null; requestAnimationFrame(matchStep); return;
+      }
+      if (comboType === 'double_horizontal') {
+        const cx = s.b.x, cy = s.b.y;
+        triggerDoubleHorizontalCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null; requestAnimationFrame(matchStep); return;
+      }
+      if (comboType === 'double_vertical') {
+        const cx = s.b.x, cy = s.b.y;
+        triggerDoubleVerticalCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null; requestAnimationFrame(matchStep); return;
+      }
+
+      // Standard swap
+      [s.aTile.color, s.bTile.color] = [s.bTile.color, s.aTile.color];
+      const matchGrid = getMatchGrid();
+if (!matchGrid.flat().some(Boolean)) return requestAnimationFrame(reverseSwap);
+
+combo++; comboPulse = 1;
+markMatchesV3(matchGrid, [{ x: s.a.x, y: s.a.y }, { x: s.b.x, y: s.b.y }]);
+
+      resetPos(); swapState = null;
+      requestAnimationFrame(matchStep);
+    }
+
+    function reverseSwap() {
+      const s = swapState;
+      if (!s.rev) {
+        s.rev = true;
+        [s.aTile.color, s.bTile.color] = [s.bTile.color, s.aTile.color];
+        s.aTile.nudgeX = s.aTile.nudgeY = 0; s.aTile.nudgeT = 0;
+        s.bTile.nudgeX = s.bTile.nudgeY = 0; s.bTile.nudgeT = 0;
+      }
+      s.progress = Math.max(s.progress - SWAP_SPEED, 0);
+      const ax = s.a.x * CELL_SIZE, ay = s.a.y * CELL_SIZE + TOPBAR_HEIGHT;
+      const bx = s.b.x * CELL_SIZE, by = s.b.y * CELL_SIZE + TOPBAR_HEIGHT;
+      s.aTile.px = ax + (bx - ax) * s.progress;
+      s.aTile.py = ay + (by - ay) * s.progress;
+      s.bTile.px = bx + (ax - bx) * s.progress;
+      s.bTile.py = by + (ay - by) * s.progress;
+      draw();
+      if (s.progress > 0) return requestAnimationFrame(reverseSwap);
+      resetPos(); swapState = null; animating = false; SFX.invalid();
+    }
+
+    let lastAnimTick = performance.now();
+    function matchStep() {
+      if (highlightingSpecial) { draw(); requestAnimationFrame(matchStep); return; }
+      const now = performance.now();
+      const dt = now - lastAnimTick; lastAnimTick = now;
+
+      let any = false;
+      grid.flat().forEach(t => {
+        const r = t.update(dt);
+        if (r === 'remove') {
+          const cx = t.px + CELL_SIZE * 0.5;
+          const cy = t.py + CELL_SIZE * 0.5;
+          spawnParticles(cx, cy, t.color, t.special ? 12 : 6);
+          SFX.pop();
+          if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+          t.toRemove = true;
+        }
+        if (t.matching) any = true;
+      });
+      draw();
+
+      if (any) {
+        requestAnimationFrame(matchStep);
+      } else if (specialsToTrigger.length > 0) {
+        const queue = specialsToTrigger.slice();
+        specialsToTrigger.length = 0;
+        queue.forEach(t => {
+          if (grid[t.y] && grid[t.y][t.x] === t && t.special) triggerSpecial(t);
+        });
+        requestAnimationFrame(matchStep);
+      } else {
+        cleanup();
+      }
+    }
+
+    function cleanup() {
+      for (let y = 0; y < GRID_SIZE; y++)
+        for (let x = 0; x < GRID_SIZE; x++)
+          if (grid[y][x]?.toRemove) grid[y][x] = null;
+      collapse();
+    }
+
+    function collapse() {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const col = [];
+        for (let y = GRID_SIZE - 1; y >= 0; y--) if (grid[y][x]) col.push(grid[y][x]);
+        const miss = GRID_SIZE - col.length;
+        for (let i = 0; i < miss; i++) col.push(new Tile(randomColor(), x, -1));
+        for (let y = GRID_SIZE - 1; y >= 0; y--) {
+          const t = col[GRID_SIZE - 1 - y];
+          t.x = x; t.y = y; t.targetPy = y * CELL_SIZE + TOPBAR_HEIGHT;
+          t.matching = false; t.toRemove = false; t.animProgress = 0;
+          t.scale = 1; t.alpha = 1; t.triggered = false; t.highlight = false;
+          if (t.py < t.targetPy && t.spawnScale === 1) t.spawnScale = 0.85;
+          grid[y][x] = t;
+        }
+      }
+      requestAnimationFrame(fall);
+    }
+
+    function fall() {
+      let moving = false;
+      grid.flat().forEach(t => { if (t.update(16.67) || t.py < t.targetPy) moving = true; });
+      draw();
+      if (moving) {
+        requestAnimationFrame(fall);
+      } else {
+        const matchGrid = getMatchGrid();
+if (matchGrid.flat().some(Boolean)) {
+  combo++; comboPulse = 1;
+  markMatchesV3(matchGrid, []);
+  requestAnimationFrame(matchStep);
+} else {
+  animating = false; combo = 0;
+}
+      }
+    }
+
+    // --- Input polish (pointer events + preview) ---
+    let pointerDown = false;
+    let dragThreshold = 8;
+    let dragCurrent = null;
+    let dragPreviewTarget = null;
+    let pointerStartClientX = 0, pointerStartClientY = 0;
+
+    canvas.addEventListener('pointerdown', e => {
+      if (debugMode && debugSelector) return;
+      if (animating || timeUp || isPaused || !hasStarted) return;
+      canvas.setPointerCapture(e.pointerId);
+      pointerDown = true;
+      pointerStartClientX = e.clientX; pointerStartClientY = e.clientY;
+      const c = getCellFromClient(e.clientX, e.clientY);
+      if (c.y < 0 || c.y >= GRID_SIZE || c.x < 0 || c.x >= GRID_SIZE) return;
+      dragStart = c; dragCurrent = c; dragPreviewTarget = null;
+    });
+
+    canvas.addEventListener('pointermove', e => {
+      if (!pointerDown || !dragStart || animating || swapState || timeUp || isPaused || !hasStarted) return;
+      const c = getCellFromClient(e.clientX, e.clientY); dragCurrent = c;
+      const dx = e.clientX - pointerStartClientX; const dy = e.clientY - pointerStartClientY;
+      const adx = Math.abs(dx), ady = Math.abs(dy);
+      if (adx > dragThreshold || ady > dragThreshold) {
+        let target = { x: dragStart.x, y: dragStart.y };
+        if (adx > ady) target.x += (dx > 0 ? 1 : -1);
+        else           target.y += (dy > 0 ? 1 : -1);
+        if (target.x >= 0 && target.x < GRID_SIZE && target.y >= 0 && target.y < GRID_SIZE) {
+          dragPreviewTarget = target;
+          if (isAdj(dragStart, target)) { startSwap(dragStart, target); dragStart = null; dragPreviewTarget = null; pointerDown = false; }
+        } else {
+          dragPreviewTarget = null;
+        }
+      }
+    });
+
+    canvas.addEventListener('pointerup', e => {
+      pointerDown = false; dragStart = null; dragPreviewTarget = null; dragCurrent = null;
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    });
+
+    canvas.addEventListener('pointerleave', () => {
+      pointerDown = false; dragStart = null; dragPreviewTarget = null; dragCurrent = null;
+    });
+
+    // Click to activate special
+    canvas.addEventListener('click', e => {
+      if (debugMode && debugSelector) return;
+      if (animating || timeUp || isPaused || !hasStarted) return;
+      const c = getCell(e);
+      const t = grid[c.y]?.[c.x];
+      if (t && t.special) {
+        animating = true; combo = 1;
+        triggerSpecial(t);
+        requestAnimationFrame(matchStep);
+      }
+    });
+
+    // Debug context menu (open palette)
+    canvas.addEventListener('contextmenu', e => {
+      if (!debugMode) return;
+      e.preventDefault();
+      const cell = getCell(e);
+      if (cell.x < 0 || cell.x >= GRID_SIZE || cell.y < 0 || cell.y >= GRID_SIZE) return;
+      debugSelector = { x: cell.x, y: cell.y };
+      draw();
+    });
+
+    canvas.addEventListener('mousedown', e => {
+      if (!debugMode || !debugSelector) return;
+      const mx = e.offsetX, my = e.offsetY;
+      for (let i = 0; i < COLORS.length; i++) {
+        if (mx >= 8 + i * 42 && mx <= 44 + i * 42 && my >= 4 && my <= 28) {
+          grid[debugSelector.y][debugSelector.x].color = COLORS[i];
+          grid[debugSelector.y][debugSelector.x].special = null;
+          debugSelector = null; draw(); return;
+        }
+      }
+      const specials = ['none', 'horizontal', 'vertical', 'bomb', 'color'];
+      for (let i = 0; i < specials.length; i++) {
+        if (mx >= 8 + i * 60 && mx <= 62 + i * 60 && my >= 36 && my <= 60) {
+          if (specials[i] === 'none') grid[debugSelector.y][debugSelector.x].special = null;
+          else grid[debugSelector.y][debugSelector.x].special = specials[i];
+          debugSelector = null; draw(); return;
+        }
+      }
+      debugSelector = null; draw();
+    }, true);
+
+    // Options & pause controls
+    function applyOptionsUI() {
+      optSfx.checked = !!OPTIONS.sfx;
+      optShake.checked = !!OPTIONS.shake;
+      optParticles.value = OPTIONS.particles || 'med';
+      optReduce.checked = !!OPTIONS.reduceMotion;
+      optVolume.value = Math.round((OPTIONS.volume ?? 0.9) * 100);
+    }
+    function attachOptionHandlers() {
+      optSfx.addEventListener('change', () => { OPTIONS.sfx = optSfx.checked; saveOptions(); });
+      optShake.addEventListener('change', () => { OPTIONS.shake = optShake.checked; saveOptions(); });
+      optParticles.addEventListener('change', () => { OPTIONS.particles = optParticles.value; saveOptions(); });
+      optReduce.addEventListener('change', () => { OPTIONS.reduceMotion = optReduce.checked; saveOptions(); });
+      optVolume.addEventListener('input', () => {
+        OPTIONS.volume = (parseInt(optVolume.value, 10) || 0) / 100;
+        saveOptions(); rampToVolume(OPTIONS.volume, 0.1);
+      });
+    }
+
+    function togglePause(force) {
+      const next = (typeof force === 'boolean') ? force : !isPaused;
+      if (timeUp || !hasStarted) return;
+      isPaused = next;
+      overlayButtons.style.display = isPaused ? 'flex' : 'none';
+      draw();
+    }
+
+    pauseBtn.addEventListener('click', () => togglePause());
+    resumeBtn.addEventListener('click', () => togglePause(false));
+    overlayRestartBtn.addEventListener('click', () => startGame());
+
+    optionsBtn.addEventListener('click', () => {
+      optionsPanel.style.display = optionsPanel.style.display === 'none' ? 'block' : 'none';
+    });
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') togglePause();
+      if (e.key === 'd' || e.key === 'D') { debugMode = !debugMode; debugSelector = null; draw(); }
+      if ((e.key === 'r' || e.key === 'R') && timeUp) startGame();
+    });
+
+    resetBtn.onclick = startGame;
+
+    // boot
+    applyOptionsUI();
+    attachOptionHandlers();
+    startGame();
+  </script>
+</body>
+</html>
+

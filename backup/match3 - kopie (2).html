@@ -1,0 +1,930 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=600, initial-scale=1.0" />
+  <title>Match-3 Game</title>
+  <style>
+    body { margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; min-height: 100vh; background: #222; }
+    #gameWrapper { margin-top: 32px; }
+    canvas { background: #333; border-radius: 16px; box-shadow: 0 4px 32px #000a; display: block; }
+    #resetBtn {
+      margin-bottom: 18px;
+      margin-top: 38px;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-weight: bold;
+      font-size: 22px;
+      background: linear-gradient(90deg, #e74c3c 0%, #3498db 100%);
+      color: #fff;
+      padding: 10px 44px;
+      border: none;
+      border-radius: 999px;
+      box-shadow: 0 2px 16px #0005;
+      cursor: pointer;
+      letter-spacing: 1.5px;
+      transition: transform 0.07s;
+      outline: none;
+    }
+    #resetBtn:active { transform: scale(0.97);}
+  </style>
+</head>
+<body>
+  <button id="resetBtn">Reset</button>
+  <div id="gameWrapper">
+    <canvas id="gameCanvas" width="600" height="700"></canvas>
+  </div>
+  <script>
+    // --- Config ---
+    const GRID_SIZE = 10;
+    const TOPBAR_HEIGHT = 60;
+    const CELL_SIZE = 60;
+    const CANVAS_W = CELL_SIZE * GRID_SIZE;
+    const CANVAS_H = TOPBAR_HEIGHT + CELL_SIZE * GRID_SIZE;
+    const COLORS = ['#e74c3c', '#f39c12', '#f1c40f', '#2ecc71', '#3498db', '#9b59b6'];
+    const FALL_SPEED = 8, MATCH_ANIM_SPEED = 0.08, SWAP_SPEED = 0.2;
+
+    const canvas = document.getElementById('gameCanvas');
+    const resetBtn = document.getElementById('resetBtn');
+    canvas.width = CANVAS_W;
+    canvas.height = CANVAS_H;
+    const ctx = canvas.getContext('2d');
+    let grid = [];
+    let animating = false;
+    let dragStart = null;
+    let score = 0;
+    let combo = 0;
+    let swapState = null;
+    let specialsToTrigger = [];
+    let timer = 60, timerInterval = null, timeUp = false;
+    let highlightingSpecial = false;
+
+    // DEBUG MODE VARS
+    let debugMode = false;
+    let debugSelector = null;
+
+    // --- Graphics ---
+    const tileImages = [];
+    for (let i = 0; i < COLORS.length; i++) {
+      const img = new Image();
+      img.src = `tile_${i}.png`;
+      tileImages.push(img);
+    }
+    const specialImages = {
+      horizontal: (()=>{let i=new Image();i.src="special_horizontal.png";return i;})(),
+      vertical:   (()=>{let i=new Image();i.src="special_vertical.png";return i;})(),
+      bomb:       (()=>{let i=new Image();i.src="special_bomb.png";return i;})(),
+      color:      (()=>{let i=new Image();i.src="special_color.png";return i;})(),
+    };
+
+    class Tile {
+      constructor(color, x, y) {
+        this.color = color;
+        this.x = x;
+        this.y = y;
+        this.px = x * CELL_SIZE;
+        this.py = y * CELL_SIZE + TOPBAR_HEIGHT;
+        this.scale = 1;
+        this.alpha = 1;
+        this.rotation = 0;
+        this.matching = false;
+        this.toRemove = false;
+        this.animProgress = 0;
+        this.targetPy = this.py;
+        this.special = null;
+        this.highlight = false;
+        this.triggered = false;
+      }
+      draw() {
+        const size = CELL_SIZE * this.scale;
+        ctx.save();
+        ctx.globalAlpha = this.alpha;
+        ctx.translate(this.px + CELL_SIZE / 2, this.py + CELL_SIZE / 2);
+        ctx.rotate(this.rotation);
+        // --- draw image if available ---
+        let imgDrawn = false;
+        if (this.special && specialImages[this.special]?.complete && specialImages[this.special]?.naturalWidth > 0) {
+          ctx.drawImage(specialImages[this.special], -size/2, -size/2, size, size);
+          imgDrawn = true;
+        } else if (!this.special) {
+          // base color index
+          const colorIdx = COLORS.indexOf(this.color);
+          const img = tileImages[colorIdx];
+          if (img && img.complete && img.naturalWidth > 0) {
+            ctx.drawImage(img, -size/2, -size/2, size, size);
+            imgDrawn = true;
+          }
+        }
+        // If no image, fallback to color fill and markers
+        if (!imgDrawn) {
+          ctx.fillStyle = this.color;
+          ctx.fillRect(-size / 2, -size / 2, size, size);
+          if (this.special) {
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+            if (this.special === 'horizontal') {
+              ctx.beginPath(); ctx.moveTo(-size/2,0); ctx.lineTo(size/2,0); ctx.stroke();
+            } else if (this.special === 'vertical') {
+              ctx.beginPath(); ctx.moveTo(0,-size/2); ctx.lineTo(0,size/2); ctx.stroke();
+            } else if (this.special === 'bomb') {
+              ctx.beginPath(); ctx.arc(0,0,size/4,0,2*Math.PI); ctx.stroke();
+            } else if (this.special === 'color') {
+              ctx.beginPath(); ctx.moveTo(-size/2,-size/2); ctx.lineTo(size/2,size/2);
+              ctx.moveTo(size/2,-size/2); ctx.lineTo(-size/2,size/2); ctx.stroke();
+            }
+          }
+        }
+        // Highlight effect
+        if (this.highlight) {
+          ctx.save();
+          ctx.lineWidth = 5;
+          ctx.strokeStyle = "#ffeb3b";
+          ctx.globalAlpha = 0.75;
+          ctx.strokeRect(-size/2+2, -size/2+2, size-4, size-4);
+          ctx.restore();
+        }
+        ctx.restore();
+      }
+      update() {
+        if (!swapState && this.py < this.targetPy) {
+          this.py = Math.min(this.py + FALL_SPEED, this.targetPy);
+        }
+        if (this.matching) {
+          this.animProgress += MATCH_ANIM_SPEED;
+          const t = Math.min(this.animProgress, 1);
+          this.scale = 1 + Math.sin(t * Math.PI) * 0.8;
+          this.rotation = t * 2 * Math.PI;
+          this.alpha = 1 - t;
+          if (this.animProgress >= 1) {
+            this.matching = false;
+            return 'remove';
+          }
+        }
+        return null;
+      }
+    }
+
+    // --- Special Combo Detection ---
+    function getSpecialComboType(a, b) {
+      const set = new Set([a.special, b.special]);
+      // Plus (line+line: any combo)
+      if (
+        (set.has('horizontal') && set.has('vertical')) ||
+        (a.special === 'horizontal' && b.special === 'horizontal') ||
+        (a.special === 'vertical' && b.special === 'vertical')
+      ) {
+        return 'plus';
+      }
+      // Bomb + line
+      if (
+        (set.has('bomb') && set.has('horizontal')) ||
+        (set.has('bomb') && set.has('vertical'))
+      ) {
+        // Which line direction?
+        if (a.special === 'horizontal' || b.special === 'horizontal') return 'double_horizontal';
+        else return 'double_vertical';
+      }
+      // Color bomb + special
+      if (set.has('color') && (set.has('horizontal') || set.has('vertical') || set.has('bomb'))) {
+        if (a.special === 'color') return b.special;
+        else return a.special;
+      }
+      return null;
+    }
+
+    // --- Combo Handlers ---
+    function highlightPlusCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let i = 0; i < GRID_SIZE; i++) {
+        grid[y][i].highlight = true;
+        grid[i][x].highlight = true;
+      }
+      draw();
+    }
+    function triggerPlusCombo(x, y, a, b) {
+      highlightPlusCombo(x, y);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        // Destroy both swapped specials directly (not as regular special triggers)
+        [a, b].forEach(pos => {
+          let t = grid[pos.y]?.[pos.x];
+          if (t) {
+            t.matching = true;
+            t.animProgress = 0;
+            t.special = null;
+          }
+        });
+        // Now destroy the plus area
+        const alreadyQueued = new Set();
+        for (let i = 0; i < GRID_SIZE; i++) {
+          let rowT = grid[y][i];
+          let colT = grid[i][x];
+          [rowT, colT].forEach(t => {
+            if (t && !t.matching) {
+              const key = t.y * 100 + t.x;
+              if (!alreadyQueued.has(key)) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true;
+                t.animProgress = 0;
+                score += combo;
+                alreadyQueued.add(key);
+              }
+            }
+          });
+        }
+      }, 50);
+    }
+    function highlightDoubleHorizontalCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let dy = -1; dy <= 1; dy++) {
+        let row = y + dy;
+        if (row >= 0 && row < GRID_SIZE) {
+          for (let col = 0; col < GRID_SIZE; col++) grid[row][col].highlight = true;
+        }
+      }
+      draw();
+    }
+    function triggerDoubleHorizontalCombo(x, y, a, b) {
+      highlightDoubleHorizontalCombo(x, y);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        // Destroy both swapped specials
+        [a, b].forEach(pos => {
+          let t = grid[pos.y]?.[pos.x];
+          if (t) {
+            t.matching = true;
+            t.animProgress = 0;
+            t.special = null;
+          }
+        });
+        // Destroy three rows centered on y (entire rows)
+        for (let dy = -1; dy <= 1; dy++) {
+          let row = y + dy;
+          if (row >= 0 && row < GRID_SIZE) {
+            for (let col = 0; col < GRID_SIZE; col++) {
+              let t = grid[row][col];
+              if (t && !t.matching) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true;
+                t.animProgress = 0;
+                score += combo;
+              }
+            }
+          }
+        }
+      }, 50);
+    }
+
+    function highlightDoubleVerticalCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let dx = -1; dx <= 1; dx++) {
+        let col = x + dx;
+        if (col >= 0 && col < GRID_SIZE) {
+          for (let row = 0; row < GRID_SIZE; row++) grid[row][col].highlight = true;
+        }
+      }
+      draw();
+    }
+    function triggerDoubleVerticalCombo(x, y, a, b) {
+      highlightDoubleVerticalCombo(x, y);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        // Destroy both swapped specials
+        [a, b].forEach(pos => {
+          let t = grid[pos.y]?.[pos.x];
+          if (t) {
+            t.matching = true;
+            t.animProgress = 0;
+            t.special = null;
+          }
+        });
+        // Destroy three columns centered on x (entire columns)
+        for (let dx = -1; dx <= 1; dx++) {
+          let col = x + dx;
+          if (col >= 0 && col < GRID_SIZE) {
+            for (let row = 0; row < GRID_SIZE; row++) {
+              let t = grid[row][col];
+              if (t && !t.matching) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true;
+                t.animProgress = 0;
+                score += combo;
+              }
+            }
+          }
+        }
+      }, 50);
+    }
+
+    // --- Color Bomb Combo: Special spreading ---
+    function highlightColorBombCombo(color, special) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+        if (grid[y][x].color === color) grid[y][x].highlight = true;
+      }
+      draw();
+    }
+function triggerColorBombCombo(colorBombTile, otherTile) {
+  let targetColor = otherTile.color;
+  let specialType = otherTile.special;
+
+  // Highlight all tiles of that color
+  highlightColorBombCombo(targetColor, specialType);
+  highlightingSpecial = true;
+  setTimeout(() => {
+    grid.flat().forEach(t => t.highlight = false);
+    highlightingSpecial = false;
+
+    // Remove both swapped tiles
+    colorBombTile.matching = true;
+    colorBombTile.animProgress = 0;
+    colorBombTile.special = null;
+    otherTile.matching = true;
+    otherTile.animProgress = 0;
+    otherTile.special = null;
+
+    // Convert or trigger all tiles of targetColor
+    let specialTiles = [];
+    for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+      let t = grid[y][x];
+      if (t.color === targetColor && t !== colorBombTile && t !== otherTile) {
+        if (t.special) {
+          t.triggered = false;
+          triggerSpecial(t); // trigger existing specials now
+        } else {
+          t.special = specialType;
+          t.triggered = false;
+          specialTiles.push(t);
+        }
+      }
+    }
+    draw();
+
+    // Ensure animation continues!
+    animating = true;
+
+    // Trigger all new specials in a fast wave
+    let i = 0;
+    function triggerNextSpecial() {
+      if (i < specialTiles.length) {
+        specialTiles[i].highlight = true;
+        draw();
+        setTimeout(() => {
+          specialTiles[i].highlight = false;
+          triggerSpecial(specialTiles[i]);
+          i++;
+          triggerNextSpecial();
+        }, 18); // tweak to taste
+      } else {
+        requestAnimationFrame(matchStep);
+      }
+    }
+    setTimeout(() => {
+      triggerNextSpecial();
+    }, 70);
+  }, 120);
+}
+
+    // --- Init ---
+    function startGame() {
+      grid = [];
+      score = 0; combo = 0; timeUp = false;
+      timer = 60;
+      specialsToTrigger = [];
+      if (timerInterval) clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        if (animating) return;
+        timer--;
+        if (timer <= 0) { timer = 0; timeUp = true; clearInterval(timerInterval);}
+        draw();
+      }, 1000);
+      for (let y = 0; y < GRID_SIZE; y++) {
+        const row = [];
+        for (let x = 0; x < GRID_SIZE; x++) row.push(new Tile(randomColor(), x, y));
+        grid.push(row);
+      }
+      clearInitialMatches();
+      draw();
+      resetBtn.textContent = "Reset";
+    }
+    function randomColor() { return COLORS[Math.floor(Math.random() * COLORS.length)]; }
+    function clearInitialMatches() {
+      let gs = getGroups();
+      while (gs.length) {
+        gs.forEach(g => g.positions.forEach(p => grid[p.y][p.x].color = randomColor()));
+        gs = getGroups();
+      }
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      // Top bar
+      ctx.save();
+      ctx.globalAlpha = 0.96;
+      ctx.fillStyle = "#1a1a1a";
+      ctx.fillRect(0,0,canvas.width,TOPBAR_HEIGHT);
+      ctx.globalAlpha = 1;
+      ctx.font = 'bold 26px Segoe UI, Arial, sans-serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Score: ${score}`, 24, 40);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = combo > 1 ? '#2ecc71' : '#fff';
+      ctx.fillText(`Combo: x${combo>1?combo:1}`, CANVAS_W/2, 40);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = timer <= 10 ? '#e74c3c' : '#fff';
+      ctx.fillText(`Time: ${timer}`, CANVAS_W-24, 40);
+      ctx.restore();
+
+      grid.flat().forEach(t => t.draw());
+
+      if (debugMode) {
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 22px Segoe UI, Arial";
+        ctx.fillText("DEBUG MODE", CANVAS_W-165, 28);
+        drawDebugSelector();
+      }
+
+            if (timeUp) {
+        ctx.save();
+        ctx.globalAlpha = 0.8;
+        ctx.fillStyle = "#111";
+        ctx.fillRect(0, TOPBAR_HEIGHT, canvas.width, canvas.height - TOPBAR_HEIGHT);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 60px Segoe UI, Arial, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("Time's Up!", CANVAS_W / 2, CANVAS_H / 2 - 30);
+        ctx.font = "bold 36px Segoe UI, Arial, sans-serif";
+        ctx.fillText(`Final Score: ${score}`, CANVAS_W / 2, CANVAS_H / 2 + 30);
+        ctx.font = "24px Segoe UI, Arial, sans-serif";
+        ctx.fillText("Press Restart or [R]", CANVAS_W / 2, CANVAS_H / 2 + 80);
+        ctx.restore();
+        resetBtn.textContent = "Restart";
+      }
+    }
+
+    // Debug selector UI
+    function drawDebugSelector() {
+      if (!debugSelector) return;
+      ctx.save();
+      ctx.globalAlpha = 0.97;
+      ctx.fillStyle = "#181a2a";
+      ctx.fillRect(0, 0, CANVAS_W, 32 + 32);
+      // Color buttons
+      COLORS.forEach((c, i) => {
+        ctx.fillStyle = c;
+        ctx.fillRect(8 + i * 42, 4, 36, 24);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(8 + i * 42, 4, 36, 24);
+      });
+      // Special buttons
+      const specials = ['none', 'horizontal', 'vertical', 'bomb', 'color'];
+      specials.forEach((s, i) => {
+        ctx.fillStyle = "#555";
+        ctx.fillRect(8 + i * 60, 36, 54, 24);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(8 + i * 60, 36, 54, 24);
+        ctx.fillStyle = "#fff";
+        ctx.font = "14px sans-serif";
+        ctx.fillText(s, 14 + i * 60, 53);
+      });
+      ctx.restore();
+    }
+
+    // --- Match Logic ---
+    function getCell(e) {
+      const r = canvas.getBoundingClientRect();
+      const y = Math.floor((e.clientY - r.top - TOPBAR_HEIGHT) / CELL_SIZE);
+      return { x: Math.floor((e.clientX - r.left) / CELL_SIZE), y };
+    }
+    function isAdj(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1; }
+
+    function getGroups() {
+      const groups = [];
+      // horizontal
+      for (let y = 0; y < GRID_SIZE; y++) {
+        let run = [{ x: 0, y }];
+        for (let x = 1; x < GRID_SIZE; x++) {
+          if (grid[y][x].color === grid[y][x - 1].color) run.push({ x, y });
+          else { if (run.length >= 3) groups.push({ positions: [...run], orient: 'h' }); run = [{ x, y }]; }
+        }
+        if (run.length >= 3) groups.push({ positions: [...run], orient: 'h' });
+      }
+      // vertical
+      for (let x = 0; x < GRID_SIZE; x++) {
+        let run = [{ x, y: 0 }];
+        for (let y = 1; y < GRID_SIZE; y++) {
+          if (grid[y][x].color === grid[y - 1][x].color) run.push({ x, y });
+          else { if (run.length >= 3) groups.push({ positions: [...run], orient: 'v' }); run = [{ x, y }]; }
+        }
+        if (run.length >= 3) groups.push({ positions: [...run], orient: 'v' });
+      }
+      return groups;
+    }
+
+    function markMatchesForAnimationAndSpecials(runs, movedTiles = []) {
+  const tileAt = (p) => grid[p.y][p.x];
+  let specialPlaced = false;
+
+  // 1. 6+ in a row/col => color bomb (always highest priority!)
+  const st6 = runs.find(g => (g.orient === 'h' || g.orient === 'v') && g.positions.length >= 6);
+  if (st6) {
+    let tPos = st6.positions.find(p => movedTiles.some(m => m.x === p.x && m.y === p.y));
+    let t = tPos ? tileAt(tPos) : tileAt(st6.positions[0]);
+    t.special = 'color';
+    st6.positions.forEach(p => { if (tileAt(p) !== t) grid[p.y][p.x].matching = true; });
+    specialPlaced = true;
+  }
+
+  // 2. 5 in a row/col or 5 in T/L (but not in a straight 6+!)
+  if (!specialPlaced) {
+    // First, try a straight 5-match
+    let bombRun = runs.find(g => g.positions.length === 5);
+    // Then, try for T/L shape-5
+    if (!bombRun) {
+      for (let i = 0; i < runs.length && !bombRun; i++) {
+        for (let j = i + 1; j < runs.length && !bombRun; j++) {
+          if (runs[i].orient !== runs[j].orient) {
+            const ov = runs[i].positions.find(p => runs[j].positions.some(q => q.x === p.x && q.y === p.y));
+            if (ov) {
+              const merged = [...new Set([...runs[i].positions, ...runs[j].positions].map(p => `${p.x},${p.y}`))]
+                .map(s => ({ x: +s.split(',')[0], y: +s.split(',')[1] }));
+              // Only allow this if merged is exactly 5!
+              if (merged.length === 5) {
+                bombRun = { positions: merged };
+              }
+            }
+          }
+        }
+      }
+    }
+    if (bombRun) {
+      let tPos = bombRun.positions.find(p => movedTiles.some(m => m.x === p.x && m.y === p.y));
+      let t = tPos ? tileAt(tPos) : tileAt(bombRun.positions[0]);
+      t.special = 'bomb';
+      bombRun.positions.forEach(p => { if (tileAt(p) !== t) grid[p.y][p.x].matching = true; });
+      specialPlaced = true;
+    }
+  }
+
+  // 3. 4 in a row/col => line special
+  if (!specialPlaced) {
+    const r4 = runs.find(g => g.positions.length === 4);
+    if (r4) {
+      let tPos = r4.positions.find(p => movedTiles.some(m => m.x === p.x && m.y === p.y));
+      let t = tPos ? tileAt(tPos) : tileAt(r4.positions[0]);
+      t.special = r4.orient === 'h' ? 'horizontal' : 'vertical';
+      r4.positions.forEach(p => { if (tileAt(p) !== t) grid[p.y][p.x].matching = true; });
+      specialPlaced = true;
+    }
+  }
+
+  // 4. Normal clear for 3+
+  if (!specialPlaced) {
+    runs.forEach(g => g.positions.forEach(p => grid[p.y][p.x].matching = true));
+  }
+}
+
+    // Highlight special area before destruction
+    function highlightSpecialArea(tile) {
+      grid.flat().forEach(t => t.highlight = false);
+      const type = tile.special;
+      if (type === 'horizontal') {
+        for (let x = 0; x < GRID_SIZE; x++) grid[tile.y][x].highlight = true;
+      } else if (type === 'vertical') {
+        for (let y = 0; y < GRID_SIZE; y++) grid[y][tile.x].highlight = true;
+      } else if (type === 'bomb') {
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const X = tile.x + dx, Y = tile.y + dy;
+          if (grid[Y]?.[X]) grid[Y][X].highlight = true;
+        }
+      } else if (type === 'color') {
+        const c = tile.color;
+        for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++)
+          if (grid[y][x].color === c) grid[y][x].highlight = true;
+      }
+      draw();
+    }
+
+    function triggerSpecial(tile) {
+      if (tile.triggered || highlightingSpecial) return;
+      tile.triggered = true;
+      highlightingSpecial = true;
+      highlightSpecialArea(tile);
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        tile.matching = true;
+        tile.animProgress = 0;
+        combo++;
+        const type = tile.special;
+        if (type === 'horizontal') {
+          for (let x = 0; x < GRID_SIZE; x++) {
+            let t = grid[tile.y][x];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true;
+              t.animProgress = 0;
+              score += combo;
+            }
+          }
+        } else if (type === 'vertical') {
+          for (let y = 0; y < GRID_SIZE; y++) {
+            let t = grid[y][tile.x];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true;
+              t.animProgress = 0;
+              score += combo;
+            }
+          }
+        } else if (type === 'bomb') {
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const X = tile.x + dx, Y = tile.y + dy;
+            let t = grid[Y]?.[X];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true;
+              t.animProgress = 0;
+              score += combo;
+            }
+          }
+        } else if (type === 'color') {
+          const c = tile.color;
+          for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+            let t = grid[y][x];
+            if (t.color === c && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true;
+              t.animProgress = 0;
+              score += combo;
+            }
+          }
+        }
+      }, 50);
+    }
+
+    function resetPos() { grid.flat().forEach(t => { t.px = t.x * CELL_SIZE; t.py = t.y * CELL_SIZE + TOPBAR_HEIGHT; }); }
+
+    function startSwap(a, b) {
+      swapState = { aTile: grid[a.y][a.x], bTile: grid[b.y][b.x], a, b,
+        progress: 0, rev: false, dir: (b.x !== a.x ? 'horizontal' : 'vertical') };
+      animating = true;
+      requestAnimationFrame(swapStep);
+    }
+
+    function swapStep() {
+      const s = swapState;
+      s.progress = Math.min(s.progress + SWAP_SPEED, 1);
+      const ax = s.a.x * CELL_SIZE, ay = s.a.y * CELL_SIZE + TOPBAR_HEIGHT;
+      const bx = s.b.x * CELL_SIZE, by = s.b.y * CELL_SIZE + TOPBAR_HEIGHT;
+      s.aTile.px = ax + (bx - ax) * s.progress;
+      s.aTile.py = ay + (by - ay) * s.progress;
+      s.bTile.px = bx + (ax - bx) * s.progress;
+      s.bTile.py = by + (ay - by) * s.progress;
+      draw();
+      if (s.progress < 1) return requestAnimationFrame(swapStep);
+
+      // --- Custom: special-to-special and color bomb combo detection ---
+      const aTile = s.aTile, bTile = s.bTile;
+      let didSpecialCombo = false;
+
+      // Color bomb combos
+      if (aTile.special === 'color' && bTile.special && bTile.special !== 'color') {
+        triggerColorBombCombo(aTile, bTile);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep);
+        return;
+      }
+      if (bTile.special === 'color' && aTile.special && aTile.special !== 'color') {
+        triggerColorBombCombo(bTile, aTile);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep);
+        return;
+      }
+
+      const comboType = getSpecialComboType(aTile, bTile);
+      if (comboType === 'plus') {
+        didSpecialCombo = true;
+        const cx = s.b.x, cy = s.b.y;
+        triggerPlusCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep);
+        return;
+      }
+      if (comboType === 'double_horizontal') {
+        didSpecialCombo = true;
+        const cx = s.b.x, cy = s.b.y;
+        triggerDoubleHorizontalCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep);
+        return;
+      }
+      if (comboType === 'double_vertical') {
+        didSpecialCombo = true;
+        const cx = s.b.x, cy = s.b.y;
+        triggerDoubleVerticalCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep);
+        return;
+      }
+
+      // Standard swap
+      [s.aTile.color, s.bTile.color] = [s.bTile.color, s.aTile.color];
+
+      const runs = getGroups();
+      if (!runs.length) return requestAnimationFrame(reverseSwap);
+
+      combo++;
+      markMatchesForAnimationAndSpecials(runs, [{ x: s.a.x, y: s.a.y }, { x: s.b.x, y: s.b.y }]);
+      runs.forEach(g => {
+        const len = g.positions.length;
+        const pts = len >= 6 ? 5 : len === 5 ? 4 : len === 4 ? 3 : 1;
+        score += pts * combo;
+      });
+
+      resetPos(); swapState = null;
+      requestAnimationFrame(matchStep);
+    }
+
+    function reverseSwap() {
+      const s = swapState;
+      if (!s.rev) { s.rev = true; [s.aTile.color, s.bTile.color] = [s.bTile.color, s.aTile.color]; }
+      s.progress = Math.max(s.progress - SWAP_SPEED, 0);
+      const ax = s.a.x * CELL_SIZE, ay = s.a.y * CELL_SIZE + TOPBAR_HEIGHT;
+      const bx = s.b.x * CELL_SIZE, by = s.b.y * CELL_SIZE + TOPBAR_HEIGHT;
+      s.aTile.px = ax + (bx - ax) * s.progress;
+      s.aTile.py = ay + (by - ay) * s.progress;
+      s.bTile.px = bx + (ax - bx) * s.progress;
+      s.bTile.py = by + (ay - by) * s.progress;
+      draw(); if (s.progress > 0) return requestAnimationFrame(reverseSwap);
+      resetPos(); swapState = null; animating = false;
+    }
+
+    function matchStep() {
+      if (highlightingSpecial) {
+        draw();
+        requestAnimationFrame(matchStep);
+        return;
+      }
+      let any = false;
+      grid.flat().forEach(t => {
+        const r = t.update();
+        if (r === 'remove') {
+          if (t.special && !t.triggered && !specialsToTrigger.includes(t)) {
+            specialsToTrigger.push(t);
+          }
+          t.toRemove = true;
+        }
+        if (t.matching) any = true;
+      });
+      draw();
+
+      if (any) {
+        requestAnimationFrame(matchStep);
+      } else if (specialsToTrigger.length > 0) {
+        let queue = specialsToTrigger.slice();
+        specialsToTrigger.length = 0;
+        queue.forEach(t => {
+          if (grid[t.y] && grid[t.y][t.x] === t && t.special) triggerSpecial(t);
+        });
+        requestAnimationFrame(matchStep);
+      } else {
+        cleanup();
+      }
+    }
+
+    function cleanup() {
+      for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) if (grid[y][x]?.toRemove) grid[y][x] = null;
+      collapse();
+    }
+    function collapse() {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const col = [];
+        for (let y = GRID_SIZE - 1; y >= 0; y--) if (grid[y][x]) col.push(grid[y][x]);
+        const miss = GRID_SIZE - col.length;
+        for (let i = 0; i < miss; i++) col.push(new Tile(randomColor(), x, -1));
+        for (let y = GRID_SIZE - 1; y >= 0; y--) {
+          const t = col[GRID_SIZE - 1 - y];
+          t.x = x;
+          t.y = y;
+          t.targetPy = y * CELL_SIZE + TOPBAR_HEIGHT;
+          t.matching = false;
+          t.toRemove = false;
+          t.animProgress = 0;
+          t.scale = 1;
+          t.alpha = 1;
+          t.triggered = false;
+          t.highlight = false;
+          grid[y][x] = t;
+        }
+      }
+      requestAnimationFrame(fall);
+    }
+
+    function fall() {
+      let moving = false;
+      grid.flat().forEach(t => { if (t.update() || t.py < t.targetPy) moving = true; });
+      draw();
+      if (moving) {
+        requestAnimationFrame(fall);
+      } else {
+        const g = getGroups();
+        if (g.length) {
+          combo++;
+          markMatchesForAnimationAndSpecials(g, []);
+          requestAnimationFrame(matchStep);
+        } else {
+          animating = false; combo = 0;
+        }
+      }
+    }
+
+    // Interactions
+    canvas.addEventListener('mousedown', e => {
+      if (debugMode && debugSelector) return;
+      if (animating || timeUp) return;
+      const c = getCell(e);
+      if (c.y < 0 || c.y >= GRID_SIZE || c.x < 0 || c.x >= GRID_SIZE) return;
+      dragStart = c;
+    });
+    canvas.addEventListener('mousemove', e => {
+      if (debugMode && debugSelector) return;
+      if (!dragStart || animating || swapState || timeUp) return;
+      const c = getCell(e);
+      if (isAdj(dragStart, c)) { startSwap(dragStart, c); dragStart = null; }
+    });
+    canvas.addEventListener('mouseup', () => { dragStart = null; });
+
+    // Click to activate special
+    canvas.addEventListener('click', e => {
+      if (debugMode && debugSelector) return;
+      if (animating || timeUp) return;
+      const c = getCell(e);
+      const t = grid[c.y]?.[c.x];
+      if (t && t.special) {
+        animating = true; combo = 1; triggerSpecial(t); requestAnimationFrame(matchStep);
+      }
+    });
+
+    // Debug contextmenu
+    canvas.addEventListener('contextmenu', e => {
+      if (!debugMode) return;
+      e.preventDefault();
+      const cell = getCell(e);
+      if (cell.x < 0 || cell.x >= GRID_SIZE || cell.y < 0 || cell.y >= GRID_SIZE) return;
+      debugSelector = {
+        x: cell.x,
+        y: cell.y
+      };
+      draw();
+    });
+
+    canvas.addEventListener('mousedown', e => {
+      if (!debugMode || !debugSelector) return;
+      const mx = e.offsetX, my = e.offsetY;
+      for (let i = 0; i < COLORS.length; i++) {
+        if (mx >= 8 + i * 42 && mx <= 44 + i * 42 && my >= 4 && my <= 28) {
+          grid[debugSelector.y][debugSelector.x].color = COLORS[i];
+          grid[debugSelector.y][debugSelector.x].special = null;
+          debugSelector = null;
+          draw(); return;
+        }
+      }
+      const specials = ['none', 'horizontal', 'vertical', 'bomb', 'color'];
+      for (let i = 0; i < specials.length; i++) {
+        if (mx >= 8 + i * 60 && mx <= 62 + i * 60 && my >= 36 && my <= 60) {
+          if (specials[i] === 'none') grid[debugSelector.y][debugSelector.x].special = null;
+          else grid[debugSelector.y][debugSelector.x].special = specials[i];
+          debugSelector = null;
+          draw(); return;
+        }
+      }
+      debugSelector = null;
+      draw();
+    }, true);
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'd' || e.key === 'D') {
+        debugMode = !debugMode;
+        debugSelector = null;
+        draw();
+      }
+      if ((e.key === 'r' || e.key === 'R') && timeUp) {
+        startGame();
+      }
+    });
+
+    resetBtn.onclick = startGame;
+
+    startGame();
+  </script>
+</body>
+</html>
+
+       

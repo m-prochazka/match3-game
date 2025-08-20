@@ -1,0 +1,1423 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=600, initial-scale=1.0" />
+  <title>Match-3 Game</title>
+  <style>
+    body { margin: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; min-height: 100vh; background: #222; }
+    #gameWrapper { margin-top: 32px; }
+    canvas { background: #333; border-radius: 16px; box-shadow: 0 4px 32px #000a; display: block; }
+    #resetBtn {
+      margin-bottom: 18px;
+      margin-top: 38px;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      font-weight: bold;
+      font-size: 22px;
+      background: linear-gradient(90deg, #e74c3c 0%, #3498db 100%);
+      color: #fff;
+      padding: 10px 44px;
+      border: none;
+      border-radius: 999px;
+      box-shadow: 0 2px 16px #0005;
+      cursor: pointer;
+      letter-spacing: 1.5px;
+      transition: transform 0.07s;
+      outline: none;
+    }
+    #resetBtn:active { transform: scale(0.97);}
+  </style>
+</head>
+<body>
+  <button id="resetBtn">Reset</button>
+  <div id="gameWrapper">
+    <canvas id="gameCanvas" width="600" height="700"></canvas>
+  </div>
+  <script>
+    // --- Config ---
+    const GRID_SIZE = 10;
+    const TOPBAR_HEIGHT = 60;
+    const CELL_SIZE = 60;
+    const CANVAS_W = CELL_SIZE * GRID_SIZE;
+    const CANVAS_H = TOPBAR_HEIGHT + CELL_SIZE * GRID_SIZE;
+    const COLORS = ['#e74c3c', '#f39c12', '#f1c40f', '#2ecc71', '#3498db', '#9b59b6'];
+    const FALL_SPEED = 8, MATCH_ANIM_SPEED = 0.08, SWAP_SPEED = 0.2;
+
+    const canvas = document.getElementById('gameCanvas');
+    const resetBtn = document.getElementById('resetBtn');
+    canvas.width = CANVAS_W;
+    canvas.height = CANVAS_H;
+    const ctx = canvas.getContext('2d');
+
+    // --- Game state ---
+    let grid = [];
+    let animating = false;
+    let dragStart = null;
+    let score = 0;
+    let combo = 0;
+    let swapState = null;
+    let specialsToTrigger = [];
+    let timer = 60, timerInterval = null, timeUp = false;
+    let highlightingSpecial = false;
+    let currentShakeX = 0, currentShakeY = 0;
+
+    // FX helpers
+    let globalPulse = 0;       // for vignette pulse
+    let comboPulse = 0;        // HUD combo flair (0..1)
+    let whiteFlashes = [];     // [{x,y,t,life}]
+    let stripedPreview = null; // {type:'h'|'v', idx, start, dur}
+
+    // DEBUG MODE VARS
+    let debugMode = false;
+    let debugSelector = null;
+
+    // --- FX: Particles (time-based + auto-throttle) ---
+    const MAX_PARTICLES = 700;              // hard cap
+    const PARTICLE_BASE_BUDGET = 240;       // base per-frame budget
+    let particleBudget = PARTICLE_BASE_BUDGET;
+
+    // Structure-of-arrays for speed + O(1) removals
+    let pxs = new Float32Array(MAX_PARTICLES);
+    let pys = new Float32Array(MAX_PARTICLES);
+    let vxs = new Float32Array(MAX_PARTICLES);
+    let vys = new Float32Array(MAX_PARTICLES);
+    let life = new Float32Array(MAX_PARTICLES);  // ms lived
+    let maxL = new Float32Array(MAX_PARTICLES);  // ms lifetime
+    let size = new Float32Array(MAX_PARTICLES);
+    let rot  = new Float32Array(MAX_PARTICLES);  // for shards
+    let isShard = new Uint8Array(MAX_PARTICLES); // 0/1
+    let cr = new Uint8Array(MAX_PARTICLES);
+    let cg = new Uint8Array(MAX_PARTICLES);
+    let cb = new Uint8Array(MAX_PARTICLES);
+    let pCount = 0;
+
+    // Frame timing (particles + throttling)
+    let lastFrameTime = performance.now();
+    let avgDt = 16.67; // EMA of frame time in ms
+
+    // Screen shake
+    let shakeAmp = 0; // pixels
+    function addShake(power) { shakeAmp = Math.min(shakeAmp + power, 24); }
+
+    function hexToRgb(hex) {
+      const i = COLORS.indexOf(hex);
+      if (i >= 0) {
+        // known palette; convert fast
+      }
+      const m = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+      return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255,255,255];
+    }
+
+    function spawnParticles(x, y, color, n = 10) {
+      // Combo-aware budget bump, clamped by perf
+      const comboBoost = combo >= 3 ? 1.2 : 1.0;
+      const perfClamp  = Math.max(0.3, Math.min(1.0, 16.67 / avgDt));
+      let budget = Math.floor(PARTICLE_BASE_BUDGET * perfClamp * comboBoost);
+      particleBudget = budget;
+
+      if (particleBudget <= 0) return;
+      n = Math.min(n, particleBudget);
+      particleBudget -= n;
+
+      const [rr, gg, bb] = hexToRgb(color);
+
+      for (let i = 0; i < n; i++) {
+        if (pCount >= MAX_PARTICLES) break;
+        const idx = pCount++;
+
+        // random unit vector (no trig)
+        let rx = (Math.random() * 2 - 1);
+        let ry = (Math.random() * 2 - 1);
+        const mag = Math.hypot(rx, ry) || 1;
+        rx /= mag; ry /= mag;
+
+        const speed = 1.4 + Math.random() * 2.6;
+        pxs[idx] = x;
+        pys[idx] = y;
+        vxs[idx] = rx * speed;
+        vys[idx] = ry * speed - 0.6;     // slight upward bias
+        life[idx] = 0;
+        maxL[idx] = 60 + (Math.random() * 70) | 0; // 60–130ms
+        size[idx] = 1.5 + Math.random() * 2.5;
+
+        // 10% shards (long rectangles)
+        const shard = (Math.random() < 0.10) ? 1 : 0;
+        isShard[idx] = shard;
+        rot[idx] = Math.atan2(vys[idx], vxs[idx]);
+
+        cr[idx] = rr; cg[idx] = gg; cb[idx] = bb;
+      }
+    }
+
+    function updateParticles(dt) {
+      const scale = dt > 0 ? (dt / 16.6667) : 1; // normalize to 60fps
+      const gravityPerFrame = 0.10;
+      const dragPerFrame = 0.985;
+      const drag = Math.pow(dragPerFrame, scale);
+
+      for (let i = pCount - 1; i >= 0; i--) {
+        life[i] += dt;
+        pxs[i] += vxs[i] * scale;
+        pys[i] += vys[i] * scale;
+        vys[i] += gravityPerFrame * scale;
+        vxs[i] *= drag;
+
+        if (life[i] > maxL[i]) {
+          const last = pCount - 1;
+          if (i !== last) {
+            pxs[i] = pxs[last]; pys[i] = pys[last];
+            vxs[i] = vxs[last]; vys[i] = vys[last];
+            life[i] = life[last]; maxL[i] = maxL[last];
+            size[i] = size[last]; rot[i] = rot[last];
+            isShard[i] = isShard[last];
+            cr[i] = cr[last]; cg[i] = cg[last]; cb[i] = cb[last];
+          }
+          pCount = last;
+        }
+      }
+    }
+
+    function drawParticles(ctx) {
+      for (let i = 0; i < pCount; i++) {
+        const a = 1 - (life[i] / maxL[i]);               // fade out
+        const wBias = 1 - a;                              // near end → whiter
+        const r = (cr[i] * (1 - wBias) + 255 * wBias) | 0;
+        const g = (cg[i] * (1 - wBias) + 255 * wBias) | 0;
+        const b = (cb[i] * (1 - wBias) + 255 * wBias) | 0;
+
+        ctx.globalAlpha = Math.max(0, a);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        const s = size[i];
+
+        if (isShard[i]) {
+          ctx.save();
+          ctx.translate(pxs[i], pys[i]);
+          ctx.rotate(rot[i]);
+          ctx.fillRect(-s * 1.5, -0.5, s * 3, 1); // 1×3 shard
+          ctx.restore();
+        } else {
+          ctx.fillRect(pxs[i] - s * 0.5, pys[i] - s * 0.5, s, s);
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    // --- SFX (WebAudio; master gain + ducking + subtle pitch variance) ---
+    let ACtx = null, masterGain = null;
+    function audioCtx() {
+      if (!ACtx) {
+        ACtx = new (window.AudioContext || window.webkitAudioContext)();
+        masterGain = ACtx.createGain();
+        masterGain.gain.value = 0.9;
+        masterGain.connect(ACtx.destination);
+      }
+      return ACtx;
+    }
+    function duck(db=-3, dur=0.08) {
+      if (!masterGain) return;
+      const ctx = ACtx;
+      const t0 = ctx.currentTime;
+      const cur = masterGain.gain.value;
+      const target = Math.pow(10, db/20) * cur;
+      masterGain.gain.cancelScheduledValues(t0);
+      masterGain.gain.setValueAtTime(cur, t0);
+      masterGain.gain.linearRampToValueAtTime(target, t0 + 0.01);
+      masterGain.gain.linearRampToValueAtTime(cur, t0 + dur);
+    }
+    function beep({freq=440, dur=0.08, type='sine', gain=0.04, rand=0}) {
+      const ctx = audioCtx();
+      const t0 = ctx.currentTime;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = type;
+      // pitch variance
+      const f = freq * (1 + (Math.random() * 2 - 1) * rand);
+      o.frequency.setValueAtTime(f, t0);
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + 0.005);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(masterGain || ctx.destination);
+      o.start(t0);
+      o.stop(t0 + dur + 0.02);
+    }
+    const SFX = {
+      swap:     () => beep({freq: 220, type:'triangle', dur:0.05, gain:0.03, rand:0.02}),
+      invalid:  () => beep({freq: 140, type:'sawtooth', dur:0.08, gain:0.025}),
+      pop:      () => beep({freq: 660, type:'square', dur:0.04, gain:0.02, rand:0.03}),
+      special:  () => { duck(-4, 0.1); beep({freq: 220, type:'sine', dur:0.07, gain:0.04}); setTimeout(()=>beep({freq:440, dur:0.06, gain:0.03, rand:0.01}),40); },
+      colorBomb:() => { duck(-5, 0.15); beep({freq: 200, type:'triangle', dur:0.09, gain:0.05}); setTimeout(()=>beep({freq: 800, dur:0.06, gain:0.03, rand:0.02}),80); },
+      sweepTick:() => beep({freq: 520, type:'square', dur:0.03, gain:0.02}),
+    };
+    resetBtn.addEventListener('click', () => { try { audioCtx().resume(); } catch {} });
+    canvas.addEventListener('pointerdown', () => { try { audioCtx().resume(); } catch {} }, { once:true });
+
+    // --- Graphics (tiles & specials images) ---
+    const tileImages = [];
+    for (let i = 0; i < COLORS.length; i++) {
+      const img = new Image();
+      img.src = `tile_${i}.png`;
+      tileImages.push(img);
+    }
+    const specialImages = {
+      horizontal: (()=>{let i=new Image();i.src="special_horizontal.png";return i;})(),
+      vertical:   (()=>{let i=new Image();i.src="special_vertical.png";return i;})(),
+      bomb:       (()=>{let i=new Image();i.src="special_bomb.png";return i;})(),
+      color:      (()=>{let i=new Image();i.src="special_color.png";return i;})(),
+    };
+
+    class Tile {
+      constructor(color, x, y) {
+        this.color = color;
+        this.x = x;
+        this.y = y;
+        this.px = x * CELL_SIZE;
+        this.py = y * CELL_SIZE + TOPBAR_HEIGHT;
+        this.scale = 1;
+        this.alpha = 1;
+        this.rotation = 0;
+        this.matching = false;
+        this.toRemove = false;
+        this.animProgress = 0;
+        this.targetPy = this.py;
+        this.special = null;
+        this.highlight = false;
+        this.triggered = false;
+        // new: spawn pop-in + nudge offsets
+        this.spawnScale = 1;   // anim for fresh tiles after collapse
+        this.nudgeX = 0; this.nudgeY = 0; this.nudgeT = 0;
+      }
+      draw() {
+        const size = CELL_SIZE * this.scale * this.spawnScale;
+        ctx.save();
+        ctx.globalAlpha = this.alpha;
+        ctx.translate(this.px + CELL_SIZE / 2 + this.nudgeX, this.py + CELL_SIZE / 2 + this.nudgeY);
+        ctx.rotate(this.rotation);
+        let imgDrawn = false;
+        if (this.special && specialImages[this.special]?.complete && specialImages[this.special]?.naturalWidth > 0) {
+          ctx.drawImage(specialImages[this.special], -size/2, -size/2, size, size);
+          imgDrawn = true;
+        } else if (!this.special) {
+          const colorIdx = COLORS.indexOf(this.color);
+          const img = tileImages[colorIdx];
+          if (img && img.complete && img.naturalWidth > 0) {
+            ctx.drawImage(img, -size/2, -size/2, size, size);
+            imgDrawn = true;
+          }
+        }
+        if (!imgDrawn) {
+          ctx.fillStyle = this.color;
+          ctx.fillRect(-size / 2, -size / 2, size, size);
+          if (this.special) {
+            ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+            if (this.special === 'horizontal') {
+              ctx.beginPath(); ctx.moveTo(-size/2,0); ctx.lineTo(size/2,0); ctx.stroke();
+            } else if (this.special === 'vertical') {
+              ctx.beginPath(); ctx.moveTo(0,-size/2); ctx.lineTo(0,size/2); ctx.stroke();
+            } else if (this.special === 'bomb') {
+              ctx.beginPath(); ctx.arc(0,0,size/4,0,2*Math.PI); ctx.stroke();
+            } else if (this.special === 'color') {
+              ctx.beginPath(); ctx.moveTo(-size/2,-size/2); ctx.lineTo(size/2,size/2);
+              ctx.moveTo(size/2,-size/2); ctx.lineTo(-size/2,size/2); ctx.stroke();
+            }
+          }
+        }
+        if (this.highlight) {
+          ctx.save();
+          ctx.lineWidth = 5;
+          ctx.strokeStyle = "#ffeb3b";
+          ctx.globalAlpha = 0.75;
+          ctx.strokeRect(-size/2+2, -size/2+2, size-4, size-4);
+          ctx.restore();
+        }
+        ctx.restore();
+      }
+      update(dt=0) {
+        // fall
+        if (!swapState && this.py < this.targetPy) {
+          this.py = Math.min(this.py + FALL_SPEED, this.targetPy);
+        }
+        // spawn pop-in scale anim (toward 1)
+        if (this.spawnScale < 1) {
+          this.spawnScale = Math.min(1, this.spawnScale + 0.12);
+        }
+        // nudge decay
+        if (this.nudgeT > 0) {
+          this.nudgeT -= dt;
+          const k = Math.max(0, this.nudgeT) / 100;
+          this.nudgeX *= 0.86;
+          this.nudgeY *= 0.86;
+          if (k <= 0) { this.nudgeX = this.nudgeY = 0; }
+        }
+        // match anim
+        if (this.matching) {
+          this.animProgress += MATCH_ANIM_SPEED;
+          const t = Math.min(this.animProgress, 1);
+          this.scale = 1 + Math.sin(t * Math.PI) * 0.8;
+          this.rotation = t * 2 * Math.PI;
+          this.alpha = 1 - t;
+          if (this.animProgress >= 1) {
+            this.matching = false;
+            return 'remove';
+          }
+        }
+        return null;
+      }
+    }
+
+    // --- Toast system ---
+    const toasts = []; // {text,x,y,t,life}
+    function addToast(text, x, y, life=700) {
+      toasts.push({ text, x, y, t: 0, life });
+    }
+    function drawToasts(dt) {
+      for (let i = toasts.length-1; i >= 0; i--) {
+        const o = toasts[i];
+        o.t += dt;
+        const p = Math.min(1, o.t / o.life);
+        const alpha = (p < 0.2) ? (p/0.2) : (1 - Math.max(0, (p-0.7)/0.3));
+        const dy = -30 * p;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, alpha);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 18px Segoe UI, Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(o.text, o.x, o.y + dy);
+        ctx.restore();
+        if (o.t >= o.life) { toasts.splice(i,1); }
+      }
+    }
+
+    // --- Special Combo Detection ---
+    function getSpecialComboType(a, b) {
+      const set = new Set([a.special, b.special]);
+      if (
+        (set.has('horizontal') && set.has('vertical')) ||
+        (a.special === 'horizontal' && b.special === 'horizontal') ||
+        (a.special === 'vertical' && b.special === 'vertical')
+      ) return 'plus';
+      if ((set.has('bomb') && set.has('horizontal')) || (set.has('bomb') && set.has('vertical'))) {
+        return (a.special === 'horizontal' || b.special === 'horizontal') ? 'double_horizontal' : 'double_vertical';
+      }
+      if (set.has('color') && (set.has('horizontal') || set.has('vertical') || set.has('bomb'))) {
+        return (a.special === 'color') ? b.special : a.special;
+      }
+      return null;
+    }
+
+    // --- Combo Handlers (with shake hooks) ---
+    function highlightPlusCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let i = 0; i < GRID_SIZE; i++) { grid[y][i].highlight = true; grid[i][x].highlight = true; }
+      draw();
+    }
+    function triggerPlusCombo(x, y, a, b) {
+      highlightPlusCombo(x, y);
+      addShake(4);
+      globalPulse = Math.min(1, globalPulse + 0.5);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        [a, b].forEach(pos => {
+          let t = grid[pos.y]?.[pos.x];
+          if (t) { t.matching = true; t.animProgress = 0; t.special = null; }
+        });
+        const alreadyQueued = new Set();
+        for (let i = 0; i < GRID_SIZE; i++) {
+          let rowT = grid[y][i]; let colT = grid[i][x];
+          [rowT, colT].forEach(t => {
+            if (t && !t.matching) {
+              const key = t.y * 100 + t.x;
+              if (!alreadyQueued.has(key)) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true; t.animProgress = 0; score += combo; alreadyQueued.add(key);
+                whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+              }
+            }
+          });
+        }
+      }, 50);
+    }
+    function highlightDoubleHorizontalCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let dy = -1; dy <= 1; dy++) {
+        let row = y + dy; if (row >= 0 && row < GRID_SIZE) for (let col = 0; col < GRID_SIZE; col++) grid[row][col].highlight = true;
+      }
+      draw();
+    }
+    function triggerDoubleHorizontalCombo(x, y, a, b) {
+      highlightDoubleHorizontalCombo(x, y);
+      addShake(5);
+      globalPulse = Math.min(1, globalPulse + 0.6);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        [a, b].forEach(pos => {
+          let t = grid[pos.y]?.[pos.x];
+          if (t) { t.matching = true; t.animProgress = 0; t.special = null; }
+        });
+        for (let dy = -1; dy <= 1; dy++) {
+          let row = y + dy;
+          if (row >= 0 && row < GRID_SIZE) {
+            for (let col = 0; col < GRID_SIZE; col++) {
+              let t = grid[row][col];
+              if (t && !t.matching) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true; t.animProgress = 0; score += combo;
+                whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+              }
+            }
+          }
+        }
+      }, 50);
+    }
+    function highlightDoubleVerticalCombo(x, y) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let dx = -1; dx <= 1; dx++) {
+        let col = x + dx; if (col >= 0 && col < GRID_SIZE) for (let row = 0; row < GRID_SIZE; row++) grid[row][col].highlight = true;
+      }
+      draw();
+    }
+    function triggerDoubleVerticalCombo(x, y, a, b) {
+      highlightDoubleVerticalCombo(x, y);
+      addShake(5);
+      globalPulse = Math.min(1, globalPulse + 0.6);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        [a, b].forEach(pos => {
+          let t = grid[pos.y]?.[pos.x];
+          if (t) { t.matching = true; t.animProgress = 0; t.special = null; }
+        });
+        for (let dx = -1; dx <= 1; dx++) {
+          let col = x + dx;
+          if (col >= 0 && col < GRID_SIZE) {
+            for (let row = 0; row < GRID_SIZE; row++) {
+              let t = grid[row][col];
+              if (t && !t.matching) {
+                if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+                t.matching = true; t.animProgress = 0; score += combo;
+                whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+              }
+            }
+          }
+        }
+      }, 50);
+    }
+
+    // Color Bomb + Color Bomb => sweep entire board row-by-row
+    function triggerDoubleColorBomb(tileA, tileB) {
+      highlightingSpecial = true;
+      animating = true;
+      SFX.colorBomb();
+      addShake(8);
+      globalPulse = 1;
+      [tileA, tileB].forEach(t => { if (!t) return; t.matching = true; t.animProgress = 0; t.special = null; });
+
+      let row = 0;
+      function sweepNextRow() {
+        if (row >= GRID_SIZE) { highlightingSpecial = false; requestAnimationFrame(matchStep); return; }
+        for (let x = 0; x < GRID_SIZE; x++) { const t = grid[row][x]; if (t) t.highlight = true; }
+        draw();
+        SFX.sweepTick();
+        addShake(2);
+        setTimeout(() => {
+          for (let x = 0; x < GRID_SIZE; x++) {
+            const t = grid[row][x];
+            if (!t || t.matching) continue;
+            if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+            t.matching = true; t.animProgress = 0;
+            whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            if (x === (GRID_SIZE >> 1)) {
+              const midX = x * CELL_SIZE + CELL_SIZE * 0.5;
+              const midY = TOPBAR_HEIGHT + row * CELL_SIZE + CELL_SIZE * 0.5;
+              spawnParticles(midX, midY, '#ffffff', 24);
+            }
+            score += Math.max(1, combo + 1);
+          }
+          for (let x = 0; x < GRID_SIZE; x++) { const t = grid[row][x]; if (t) t.highlight = false; }
+          draw();
+          row++;
+          setTimeout(sweepNextRow, 70);
+        }, 90);
+      }
+      setTimeout(sweepNextRow, 60);
+    }
+
+    // --- Color Bomb Combo: Special spreading (sequential trigger wave) ---
+    function highlightColorBombCombo(color) {
+      grid.flat().forEach(t => t.highlight = false);
+      for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+        if (grid[y][x].color === color) grid[y][x].highlight = true;
+      }
+      draw();
+    }
+    function triggerColorBombCombo(colorBombTile, otherTile) {
+      const targetColor = otherTile.color;
+      const specialType = otherTile.special;
+
+      highlightColorBombCombo(targetColor);
+      SFX.colorBomb();
+      globalPulse = Math.min(1, globalPulse + 0.7);
+      highlightingSpecial = true;
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+
+        // Remove both swapped tiles
+        colorBombTile.matching = true; colorBombTile.animProgress = 0; colorBombTile.special = null;
+        otherTile.matching     = true; otherTile.animProgress     = 0; otherTile.special     = null;
+
+        // Convert or trigger all tiles of targetColor
+        let specialTiles = [];
+        for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+          let t = grid[y][x];
+          if (t.color === targetColor && t !== colorBombTile && t !== otherTile) {
+            if (t.special) {
+              t.triggered = false;
+              specialsToTrigger.push(t);
+            } else {
+              t.special = specialType;
+              t.triggered = false;
+              specialTiles.push(t);
+              onSpecialCreated(t); // toast + glow
+            }
+          }
+        }
+        draw();
+
+        // Trigger all new specials sequentially
+        animating = true;
+        let i = 0;
+        function triggerNextSpecial() {
+          if (i >= specialTiles.length) { requestAnimationFrame(matchStep); return; }
+          if (highlightingSpecial) { setTimeout(triggerNextSpecial, 12); return; }
+          const st = specialTiles[i++];
+          if (!st || st.matching) { setTimeout(triggerNextSpecial, 0); return; }
+          st.highlight = true; draw();
+          setTimeout(() => {
+            st.highlight = false;
+            triggerSpecial(st);
+            setTimeout(triggerNextSpecial, 60);
+          }, 40);
+        }
+        setTimeout(triggerNextSpecial, 60);
+      }, 120);
+    }
+
+    // --- Init ---
+    function startGame() {
+      grid = [];
+      score = 0; combo = 0; comboPulse = 0; timeUp = false;
+      timer = 60;
+      specialsToTrigger = [];
+      whiteFlashes = [];
+      stripedPreview = null;
+      globalPulse = 0;
+      if (timerInterval) clearInterval(timerInterval);
+      timerInterval = setInterval(() => {
+        if (animating) return;
+        timer--;
+        if (timer <= 0) { timer = 0; timeUp = true; clearInterval(timerInterval); }
+        draw();
+      }, 1000);
+      for (let y = 0; y < GRID_SIZE; y++) {
+        const row = [];
+        for (let x = 0; x < GRID_SIZE; x++) row.push(new Tile(randomColor(), x, y));
+        grid.push(row);
+      }
+      clearInitialMatches();
+      draw();
+      resetBtn.textContent = "Reset";
+    }
+    function randomColor() { return COLORS[Math.floor(Math.random() * COLORS.length)]; }
+    function clearInitialMatches() {
+      let gs = getGroups();
+      while (gs.length) {
+        gs.forEach(g => g.positions.forEach(p => grid[p.y][p.x].color = randomColor()));
+        gs = getGroups();
+      }
+    }
+
+    // --- Drawing / UI ---
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const now = performance.now();
+      const dt = now - lastFrameTime;
+      lastFrameTime = now;
+      avgDt = avgDt * 0.9 + dt * 0.1;
+
+      // HUD (no shake)
+      ctx.save();
+      ctx.globalAlpha = 0.96;
+      ctx.fillStyle = "#1a1a1a";
+      ctx.fillRect(0,0,canvas.width,TOPBAR_HEIGHT);
+      ctx.globalAlpha = 1;
+
+      // Combo pulse anim
+      comboPulse = Math.max(0, comboPulse - dt / 140); // decay
+      const pulseS = 1 + 0.15 * Math.sin((1 - comboPulse) * Math.PI) * Math.max(0, comboPulse);
+      ctx.save();
+      ctx.font = `bold 26px Segoe UI, Arial, sans-serif`;
+      ctx.fillStyle = combo > 1 ? '#f6d06f' : '#fff';
+      ctx.textAlign = 'left';
+      ctx.fillText(`Score: ${score}`, 24, 40);
+      ctx.textAlign = 'center';
+      ctx.save();
+      ctx.translate(CANVAS_W/2, 40);
+      ctx.scale(pulseS, pulseS);
+      ctx.fillText(`Combo: x${combo>1?combo:1}`, 0, 0);
+      ctx.restore();
+      ctx.textAlign = 'right';
+      ctx.fillStyle = timer <= 10 ? '#e74c3c' : '#fff';
+      ctx.fillText(`Time: ${timer}`, CANVAS_W-24, 40);
+      ctx.restore();
+
+      // Shake (decay with dt)
+      const decay = Math.pow(0.88, dt / 16.67);
+      shakeAmp *= decay;
+      const sx = (Math.random() * 2 - 1) * shakeAmp;
+      const sy = (Math.random() * 2 - 1) * shakeAmp;
+
+      // Apply shake to playfield
+      currentShakeX = sx;
+      currentShakeY = sy;
+      ctx.save();
+      ctx.translate(sx, sy);
+
+      // Tiles
+      grid.flat().forEach(t => t.draw());
+
+      // White flash overlays (quick 2–3px edge flash)
+      for (let i = whiteFlashes.length-1; i >= 0; i--) {
+        const f = whiteFlashes[i];
+        f.t += dt;
+        const p = Math.min(1, f.t / f.life);
+        const a = (p < 0.3) ? (p/0.3) : (1 - (p-0.3)/0.7);
+        const x = f.x * CELL_SIZE, y = f.y * CELL_SIZE + TOPBAR_HEIGHT;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, a) * 0.9;
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 3;
+        ctx.strokeRect(x+2, y+2, CELL_SIZE-4, CELL_SIZE-4);
+        ctx.restore();
+        if (f.t >= f.life) whiteFlashes.splice(i,1);
+      }
+
+      // Striped preview line (200ms sweep)
+      if (stripedPreview) {
+        const { type, idx, start, dur } = stripedPreview;
+        const t = (now - start) / dur;
+        if (t <= 1) {
+          ctx.save();
+          ctx.globalAlpha = 0.8;
+          ctx.fillStyle = '#ffffff';
+          if (type === 'h') {
+            const y = TOPBAR_HEIGHT + idx * CELL_SIZE + CELL_SIZE/2 - 1;
+            const w = CANVAS_W * t;
+            ctx.fillRect(0, y, w, 2);
+          } else {
+            const x = idx * CELL_SIZE + CELL_SIZE/2 - 1;
+            const h = (CANVAS_H - TOPBAR_HEIGHT) * t;
+            ctx.fillRect(x, TOPBAR_HEIGHT, 2, h);
+          }
+          ctx.restore();
+        } else {
+          stripedPreview = null; // done
+        }
+      }
+
+      // Particles (time-based + auto-throttle)
+      const budgetScale = Math.max(0.3, Math.min(1.0, 16.67 / avgDt));
+      particleBudget = Math.floor(PARTICLE_BASE_BUDGET * budgetScale);
+      updateParticles(dt);
+      drawParticles(ctx);
+
+      // Drag preview highlight (inside shake)
+      if (dragStart && !swapState && !timeUp) {
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(dragStart.x * CELL_SIZE, dragStart.y * CELL_SIZE + TOPBAR_HEIGHT, CELL_SIZE, CELL_SIZE);
+        if (dragPreviewTarget) {
+          ctx.globalAlpha = 0.22;
+          ctx.fillRect(dragPreviewTarget.x * CELL_SIZE, dragPreviewTarget.y * CELL_SIZE + TOPBAR_HEIGHT, CELL_SIZE, CELL_SIZE);
+        }
+        ctx.restore();
+      }
+
+      ctx.restore(); // end shaken playfield
+
+      // Board pulse vignette (big events)
+      if (globalPulse > 0) {
+        globalPulse = Math.max(0, globalPulse - dt/300);
+        const g = ctx.createRadialGradient(CANVAS_W/2, CANVAS_H/2, 10, CANVAS_W/2, CANVAS_H/2, Math.max(CANVAS_W, CANVAS_H)/1.1);
+        g.addColorStop(0, `rgba(0,0,0,${0.0 * globalPulse})`);
+        g.addColorStop(1, `rgba(0,0,0,${0.25 * globalPulse})`);
+        ctx.save();
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.restore();
+      }
+
+      // Toasts (screen space)
+      drawToasts(dt);
+
+      // Debug overlay (no shake)
+      if (debugMode) {
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 22px Segoe UI, Arial";
+        ctx.fillText("DEBUG MODE", CANVAS_W-165, 28);
+        drawDebugSelector();
+      }
+
+      // Time-up overlay (no shake)
+      if (timeUp) {
+        ctx.save();
+        ctx.globalAlpha = 0.8;
+        ctx.fillStyle = "#111";
+        ctx.fillRect(0, TOPBAR_HEIGHT, canvas.width, canvas.height - TOPBAR_HEIGHT);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#fff";
+        ctx.font = "bold 60px Segoe UI, Arial, sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("Time's Up!", CANVAS_W / 2, CANVAS_H / 2 - 30);
+        ctx.font = "bold 36px Segoe UI, Arial, sans-serif";
+        ctx.fillText(`Final Score: ${score}`, CANVAS_W / 2, CANVAS_H / 2 + 30);
+        ctx.font = "24px Segoe UI, Arial, sans-serif";
+        ctx.fillText("Press Restart or [R]", CANVAS_W / 2, CANVAS_H / 2 + 80);
+        ctx.restore();
+        resetBtn.textContent = "Restart";
+      }
+    }
+
+    // Debug selector UI
+    function drawDebugSelector() {
+      if (!debugSelector) return;
+      ctx.save();
+      ctx.globalAlpha = 0.97;
+      ctx.fillStyle = "#181a2a";
+      ctx.fillRect(0, 0, CANVAS_W, 32 + 32);
+      COLORS.forEach((c, i) => {
+        ctx.fillStyle = c;
+        ctx.fillRect(8 + i * 42, 4, 36, 24);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(8 + i * 42, 4, 36, 24);
+      });
+      const specials = ['none', 'horizontal', 'vertical', 'bomb', 'color'];
+      specials.forEach((s, i) => {
+        ctx.fillStyle = "#555";
+        ctx.fillRect(8 + i * 60, 36, 54, 24);
+        ctx.strokeStyle = '#fff';
+        ctx.strokeRect(8 + i * 60, 36, 54, 24);
+        ctx.fillStyle = "#fff";
+        ctx.font = "14px sans-serif";
+        ctx.fillText(s, 14 + i * 60, 53);
+      });
+      ctx.restore();
+    }
+
+    // --- Match Logic helpers ---
+function getCell(e) {
+  const r = canvas.getBoundingClientRect();
+  const localX = (e.clientX - r.left) - currentShakeX;
+  const localY = (e.clientY - r.top) - currentShakeY - TOPBAR_HEIGHT;
+  const x = Math.floor(localX / CELL_SIZE);
+  const y = Math.floor(localY / CELL_SIZE);
+  return { x, y };
+}
+
+// use this when you only have raw client coords (pointer events)
+function getCellFromClient(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  const localX = (clientX - r.left) - currentShakeX;
+  const localY = (clientY - r.top) - currentShakeY - TOPBAR_HEIGHT;
+  const x = Math.floor(localX / CELL_SIZE);
+  const y = Math.floor(localY / CELL_SIZE);
+  return { x, y };
+}
+
+function isAdj(a, b) {
+  return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1;
+}
+    function getGroups() {
+      const groups = [];
+      // horizontal
+      for (let y = 0; y < GRID_SIZE; y++) {
+        let run = [{ x: 0, y }];
+        for (let x = 1; x < GRID_SIZE; x++) {
+          if (grid[y][x].color === grid[y][x - 1].color) run.push({ x, y });
+          else { if (run.length >= 3) groups.push({ positions: [...run], orient: 'h' }); run = [{ x, y }]; }
+        }
+        if (run.length >= 3) groups.push({ positions: [...run], orient: 'h' });
+      }
+      // vertical
+      for (let x = 0; x < GRID_SIZE; x++) {
+        let run = [{ x, y: 0 }];
+        for (let y = 1; y < GRID_SIZE; y++) {
+          if (grid[y][x].color === grid[y - 1][x].color) run.push({ x, y });
+          else { if (run.length >= 3) groups.push({ positions: [...run], orient: 'v' }); run = [{ x, y }]; }
+        }
+        if (run.length >= 3) groups.push({ positions: [...run], orient: 'v' });
+      }
+      return groups;
+    }
+
+    // toast + preview when a special is created
+    function onSpecialCreated(tile) {
+      const cx = tile.x * CELL_SIZE + CELL_SIZE/2;
+      const cy = TOPBAR_HEIGHT + tile.y * CELL_SIZE + CELL_SIZE/2;
+      if (tile.special === 'horizontal') {
+        addToast('Striped!', cx, cy - 28);
+        stripedPreview = { type:'h', idx: tile.y, start: performance.now(), dur: 200 };
+      } else if (tile.special === 'vertical') {
+        addToast('Striped!', cx, cy - 28);
+        stripedPreview = { type:'v', idx: tile.x, start: performance.now(), dur: 200 };
+      } else if (tile.special === 'bomb') {
+        addToast('Bomb!', cx, cy - 28);
+      } else if (tile.special === 'color') {
+        addToast('Color Bomb!', cx, cy - 28);
+      }
+      // glow/flash
+      whiteFlashes.push({ x: tile.x, y: tile.y, t: 0, life: 160 });
+    }
+
+    // --- Robust special placement with effects ---
+    function markMatchesForAnimationAndSpecials(runs, movedTiles = []) {
+      const tileAt = (p) => grid[p.y][p.x];
+      const isMoved = (p) => movedTiles.some(m => m.x === p.x && m.y === p.y);
+
+      if (!runs.length) return;
+
+      // helper: choose pivot preferring moved & non-special
+      function choosePivot(run) {
+        let cand = run.positions.filter(p => !tileAt(p).special);
+        let mv = cand.find(isMoved);
+        if (mv) return mv;
+        if (cand.length) return cand[Math.floor(cand.length / 2)];
+        return run.positions.find(isMoved) || run.positions[Math.floor(run.positions.length / 2)];
+      }
+
+      // 1) Any straight 6+ ⇒ COLOR BOMB
+      const straight6 = runs
+        .filter(g => g.positions.length >= 6)
+        .sort((a, b) => b.positions.length - a.positions.length);
+      if (straight6.length) {
+        const sel = straight6.find(g => g.positions.some(isMoved)) || straight6[0];
+        const pivot = choosePivot(sel);
+        const t = tileAt(pivot);
+        if (!t.special) {
+          t.special = 'color';
+          onSpecialCreated(t);
+          sel.positions.forEach(p => {
+            if (p.x !== pivot.x || p.y !== pivot.y) {
+              grid[p.y][p.x].matching = true;
+              whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 });
+            }
+          });
+          return;
+        } else {
+          const alt = sel.positions.find(p => !tileAt(p).special);
+          if (alt) {
+            const tt = tileAt(alt);
+            tt.special = 'color';
+            onSpecialCreated(tt);
+            sel.positions.forEach(p => {
+              if (p.x !== alt.x || p.y !== alt.y) {
+                grid[p.y][p.x].matching = true;
+                whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 });
+              }
+            });
+            return;
+          }
+          sel.positions.forEach(p => { grid[p.y][p.x].matching = true; whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 }); });
+          return;
+        }
+      }
+
+      // 2) Exact T/L of 5 ⇒ BOMB at intersection
+      const hRuns = runs.filter(g => g.orient === 'h' && g.positions.length >= 3);
+      const vRuns = runs.filter(g => g.orient === 'v' && g.positions.length >= 3);
+      for (let h of hRuns) for (let v of vRuns) {
+        const ov = h.positions.find(p => v.positions.some(q => q.x === p.x && q.y === p.y));
+        if (ov) {
+          const uniq = [...new Map([...h.positions, ...v.positions].map(p => [`${p.x},${p.y}`, p])).values()];
+          if (uniq.length === 5) {
+            // place bomb at intersection (or nearest non-special)
+            let pivot = ov;
+            if (tileAt(pivot).special) {
+              pivot = uniq.find(p => !tileAt(p).special) || pivot;
+            }
+            const t = tileAt(pivot);
+            if (!t.special) {
+              t.special = 'bomb';
+              onSpecialCreated(t);
+              uniq.forEach(p => {
+                if (p.x !== pivot.x || p.y !== pivot.y) {
+                  grid[p.y][p.x].matching = true;
+                  whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 });
+                }
+              });
+            } else {
+              uniq.forEach(p => { grid[p.y][p.x].matching = true; whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 }); });
+            }
+            return;
+          }
+        }
+      }
+
+      // 3) Straight 5 ⇒ BOMB
+      const straight5 = runs.filter(g => g.positions.length === 5);
+      if (straight5.length) {
+        const sel = straight5.find(g => g.positions.some(isMoved)) || straight5[0];
+        let pivot = sel.positions.find(p => isMoved(p) && !tileAt(p).special)
+                 || sel.positions.find(p => !tileAt(p).special)
+                 || sel.positions[2];
+        const t = tileAt(pivot);
+        if (!t.special) {
+          t.special = 'bomb';
+          onSpecialCreated(t);
+          sel.positions.forEach(p => {
+            if (p.x !== pivot.x || p.y !== pivot.y) {
+              grid[p.y][p.x].matching = true;
+              whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 });
+            }
+          });
+        } else {
+          sel.positions.forEach(p => { grid[p.y][p.x].matching = true; whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 }); });
+        }
+        return;
+      }
+
+      // 4) Straight 4 ⇒ STRIPED (orientation of run)
+      const straight4 = runs.filter(g => g.positions.length === 4);
+      if (straight4.length) {
+        const sel = straight4.find(g => g.positions.some(isMoved)) || straight4[0];
+        let pivot = sel.positions.find(p => isMoved(p) && !tileAt(p).special)
+                 || sel.positions.find(p => !tileAt(p).special)
+                 || sel.positions[1];
+        const t = tileAt(pivot);
+        if (!t.special) {
+          t.special = sel.orient === 'h' ? 'horizontal' : 'vertical';
+          onSpecialCreated(t);
+          sel.positions.forEach(p => {
+            if (p.x !== pivot.x || p.y !== pivot.y) {
+              grid[p.y][p.x].matching = true;
+              whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 });
+            }
+          });
+        } else {
+          sel.positions.forEach(p => { grid[p.y][p.x].matching = true; whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 }); });
+        }
+        return;
+      }
+
+      // 5) Default: clear all 3+
+      for (const g of runs) for (const p of g.positions) {
+        grid[p.y][p.x].matching = true;
+        whiteFlashes.push({ x: p.x, y: p.y, t: 0, life: 120 });
+      }
+    }
+
+    // Highlight area before destruction
+    function highlightSpecialArea(tile) {
+      grid.flat().forEach(t => t.highlight = false);
+      const type = tile.special;
+      if (type === 'horizontal') {
+        for (let x = 0; x < GRID_SIZE; x++) grid[tile.y][x].highlight = true;
+      } else if (type === 'vertical') {
+        for (let y = 0; y < GRID_SIZE; y++) grid[y][tile.x].highlight = true;
+      } else if (type === 'bomb') {
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const X = tile.x + dx, Y = tile.y + dy;
+          if (grid[Y]?.[X]) grid[Y][X].highlight = true;
+        }
+      } else if (type === 'color') {
+        const c = tile.color;
+        for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++)
+          if (grid[y][x].color === c) grid[y][x].highlight = true;
+      }
+      draw();
+    }
+
+    function triggerSpecial(tile) {
+      if (tile.triggered || highlightingSpecial) return;
+      tile.triggered = true;
+      highlightingSpecial = true;
+      combo++;
+      comboPulse = 1; // HUD flair
+      SFX.special();
+
+      if (tile.special === 'bomb') addShake(6);
+      else if (tile.special === 'horizontal' || tile.special === 'vertical') addShake(3);
+      else if (tile.special === 'color') addShake(2);
+
+      highlightSpecialArea(tile);
+      setTimeout(() => {
+        grid.flat().forEach(t => t.highlight = false);
+        highlightingSpecial = false;
+        tile.matching = true;
+        tile.animProgress = 0;
+
+        const type = tile.special;
+        if (type === 'horizontal') {
+          for (let x = 0; x < GRID_SIZE; x++) {
+            let t = grid[tile.y][x];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        } else if (type === 'vertical') {
+          for (let y = 0; y < GRID_SIZE; y++) {
+            let t = grid[y][tile.x];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        } else if (type === 'bomb') {
+          for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+            const X = tile.x + dx, Y = tile.y + dy;
+            let t = grid[Y]?.[X];
+            if (t && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        } else if (type === 'color') {
+          const c = tile.color;
+          for (let y = 0; y < GRID_SIZE; y++) for (let x = 0; x < GRID_SIZE; x++) {
+            let t = grid[y][x];
+            if (t.color === c && !t.matching && t !== tile) {
+              if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+              t.matching = true; t.animProgress = 0; score += combo;
+              whiteFlashes.push({ x: t.x, y: t.y, t: 0, life: 120 });
+            }
+          }
+        }
+      }, 50);
+    }
+
+    function resetPos() {
+  grid.flat().forEach(t => {
+    t.px = t.x * CELL_SIZE;
+    t.py = t.y * CELL_SIZE + TOPBAR_HEIGHT;
+    // wipe any transient transforms
+    t.nudgeX = 0; t.nudgeY = 0; t.nudgeT = 0;
+    t.rotation = 0; t.scale = 1; t.alpha = 1;
+    t.spawnScale = Math.max(1, t.spawnScale); // don’t shrink on snap
+  });
+}
+
+    function startSwap(a, b) {
+      const aTile = grid[a.y][a.x], bTile = grid[b.y][b.x];
+      swapState = { aTile, bTile, a, b, progress: 0, rev: false, dir: (b.x !== a.x ? 'horizontal' : 'vertical') };
+      SFX.swap();
+      // little nudge on intent
+      const n = 6;
+      if (swapState.dir === 'horizontal') {
+        aTile.nudgeX = (b.x > a.x ? n : -n); aTile.nudgeY = 0; aTile.nudgeT = 120;
+        bTile.nudgeX = (a.x > b.x ? n : -n); bTile.nudgeY = 0; bTile.nudgeT = 120;
+      } else {
+        aTile.nudgeY = (b.y > a.y ? n : -n); aTile.nudgeX = 0; aTile.nudgeT = 120;
+        bTile.nudgeY = (a.y > b.y ? n : -n); bTile.nudgeX = 0; bTile.nudgeT = 120;
+      }
+      animating = true;
+      requestAnimationFrame(swapStep);
+    }
+
+    function swapStep() {
+      const s = swapState;
+      s.progress = Math.min(s.progress + SWAP_SPEED, 1);
+      const ax = s.a.x * CELL_SIZE, ay = s.a.y * CELL_SIZE + TOPBAR_HEIGHT;
+      const bx = s.b.x * CELL_SIZE, by = s.b.y * CELL_SIZE + TOPBAR_HEIGHT;
+      s.aTile.px = ax + (bx - ax) * s.progress;
+      s.aTile.py = ay + (by - ay) * s.progress;
+      s.bTile.px = bx + (ax - bx) * s.progress;
+      s.bTile.py = by + (ay - by) * s.progress;
+      draw();
+      if (s.progress < 1) return requestAnimationFrame(swapStep);
+
+      // Special combos
+      const aTile = s.aTile, bTile = s.bTile;
+
+      // Color bomb + color bomb
+      if (aTile.special === 'color' && bTile.special === 'color') {
+        triggerDoubleColorBomb(aTile, bTile);
+        resetPos(); swapState = null;
+        return;
+      }
+      // Color bomb + other special
+      if (aTile.special === 'color' && bTile.special && bTile.special !== 'color') {
+        triggerColorBombCombo(aTile, bTile);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep); return;
+      }
+      if (bTile.special === 'color' && aTile.special && aTile.special !== 'color') {
+        triggerColorBombCombo(bTile, aTile);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep); return;
+      }
+
+      const comboType = getSpecialComboType(aTile, bTile);
+      if (comboType === 'plus') {
+        const cx = s.b.x, cy = s.b.y;
+        triggerPlusCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep); return;
+      }
+      if (comboType === 'double_horizontal') {
+        const cx = s.b.x, cy = s.b.y;
+        triggerDoubleHorizontalCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep); return;
+      }
+      if (comboType === 'double_vertical') {
+        const cx = s.b.x, cy = s.b.y;
+        triggerDoubleVerticalCombo(cx, cy, s.a, s.b);
+        resetPos(); swapState = null;
+        requestAnimationFrame(matchStep); return;
+      }
+
+      // Standard swap: swap colors
+      [s.aTile.color, s.bTile.color] = [s.bTile.color, s.aTile.color];
+
+      const runs = getGroups();
+      if (!runs.length) return requestAnimationFrame(reverseSwap);
+
+      combo++;
+      comboPulse = 1;
+      markMatchesForAnimationAndSpecials(runs, [{ x: s.a.x, y: s.a.y }, { x: s.b.x, y: s.b.y }]);
+      runs.forEach(g => {
+        const len = g.positions.length;
+        const pts = len >= 6 ? 100 : len === 5 ? 60 : len === 4 ? 30 : 10;
+        score += pts + combo * 2;
+      });
+
+      resetPos(); swapState = null;
+      requestAnimationFrame(matchStep);
+    }
+
+function reverseSwap() {
+  const s = swapState;
+  if (!s.rev) {
+    s.rev = true;
+    // swap colors back
+    [s.aTile.color, s.bTile.color] = [s.bTile.color, s.aTile.color];
+
+    // KILL any nudge offsets immediately so alignment is perfect
+    s.aTile.nudgeX = s.aTile.nudgeY = 0; s.aTile.nudgeT = 0;
+    s.bTile.nudgeX = s.bTile.nudgeY = 0; s.bTile.nudgeT = 0;
+  }
+  s.progress = Math.max(s.progress - SWAP_SPEED, 0);
+  const ax = s.a.x * CELL_SIZE, ay = s.a.y * CELL_SIZE + TOPBAR_HEIGHT;
+  const bx = s.b.x * CELL_SIZE, by = s.b.y * CELL_SIZE + TOPBAR_HEIGHT;
+  s.aTile.px = ax + (bx - ax) * s.progress;
+  s.aTile.py = ay + (by - ay) * s.progress;
+  s.bTile.px = bx + (ax - bx) * s.progress;
+  s.bTile.py = by + (ay - by) * s.progress;
+  draw();
+  if (s.progress > 0) return requestAnimationFrame(reverseSwap);
+
+  // snap and finish
+  resetPos();
+  swapState = null; animating = false; SFX.invalid();
+}
+
+    let lastAnimTick = performance.now();
+
+    function matchStep() {
+      if (highlightingSpecial) { draw(); requestAnimationFrame(matchStep); return; }
+      const now = performance.now();
+      const dt = now - lastAnimTick; lastAnimTick = now;
+
+      let any = false;
+      grid.flat().forEach(t => {
+        const r = t.update(dt);
+        if (r === 'remove') {
+          const cx = t.px + CELL_SIZE * 0.5;
+          const cy = t.py + CELL_SIZE * 0.5;
+          spawnParticles(cx, cy, t.color, t.special ? 12 : 6);
+          SFX.pop();
+          if (t.special && !t.triggered && !specialsToTrigger.includes(t)) specialsToTrigger.push(t);
+          t.toRemove = true;
+        }
+        if (t.matching) any = true;
+      });
+      draw();
+
+      if (any) {
+        requestAnimationFrame(matchStep);
+      } else if (specialsToTrigger.length > 0) {
+        let queue = specialsToTrigger.slice();
+        specialsToTrigger.length = 0;
+        queue.forEach(t => {
+          if (grid[t.y] && grid[t.y][t.x] === t && t.special) triggerSpecial(t);
+        });
+        requestAnimationFrame(matchStep);
+      } else {
+        cleanup();
+      }
+    }
+
+    function cleanup() {
+      for (let y = 0; y < GRID_SIZE; y++)
+        for (let x = 0; x < GRID_SIZE; x++)
+          if (grid[y][x]?.toRemove) grid[y][x] = null;
+      collapse();
+    }
+
+    function collapse() {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const col = [];
+        for (let y = GRID_SIZE - 1; y >= 0; y--) if (grid[y][x]) col.push(grid[y][x]);
+        const miss = GRID_SIZE - col.length;
+        for (let i = 0; i < miss; i++) col.push(new Tile(randomColor(), x, -1));
+        for (let y = GRID_SIZE - 1; y >= 0; y--) {
+          const t = col[GRID_SIZE - 1 - y];
+          t.x = x; t.y = y; t.targetPy = y * CELL_SIZE + TOPBAR_HEIGHT;
+          t.matching = false; t.toRemove = false; t.animProgress = 0;
+          t.scale = 1; t.alpha = 1; t.triggered = false; t.highlight = false;
+          if (t.py < t.targetPy && t.spawnScale === 1) t.spawnScale = 0.85; // pop-in for new/falling tiles
+          grid[y][x] = t;
+        }
+      }
+      requestAnimationFrame(fall);
+    }
+
+    function fall() {
+      let moving = false;
+      grid.flat().forEach(t => { if (t.update(16.67) || t.py < t.targetPy) moving = true; });
+      draw();
+      if (moving) {
+        requestAnimationFrame(fall);
+      } else {
+        const g = getGroups();
+        if (g.length) {
+          combo++;
+          comboPulse = 1;
+          markMatchesForAnimationAndSpecials(g, []);
+          requestAnimationFrame(matchStep);
+        } else {
+          animating = false; combo = 0;
+        }
+      }
+    }
+
+    // --- Input polish (pointer events + preview) ---
+    let pointerDown = false;
+    let dragThreshold = 8; // px before intentional drag
+    let dragCurrent = null; // current hover (grid coords)
+    let dragPreviewTarget = null; // potential swap target
+    let pointerStartClientX = 0, pointerStartClientY = 0;
+
+    canvas.addEventListener('pointerdown', e => {
+      if (debugMode && debugSelector) return;
+      if (animating || timeUp) return;
+      canvas.setPointerCapture(e.pointerId);
+      pointerDown = true;
+
+      pointerStartClientX = e.clientX;
+      pointerStartClientY = e.clientY;
+
+      const c = getCellFromClient(e.clientX, e.clientY);
+      if (c.y < 0 || c.y >= GRID_SIZE || c.x < 0 || c.x >= GRID_SIZE) return;
+      dragStart = c; dragCurrent = c; dragPreviewTarget = null;
+    });
+
+    canvas.addEventListener('pointermove', e => {
+      if (!pointerDown || !dragStart || animating || swapState || timeUp) return;
+      const c = getCellFromClient(e.clientX, e.clientY);
+      dragCurrent = c;
+
+      // Use pointer-drag delta from exact press point (no tile-center bias)
+      const dx = e.clientX - pointerStartClientX;
+      const dy = e.clientY - pointerStartClientY;
+      const adx = Math.abs(dx), ady = Math.abs(dy);
+
+      if (adx > dragThreshold || ady > dragThreshold) {
+        let target = { x: dragStart.x, y: dragStart.y };
+        if (adx > ady) target.x += (dx > 0 ? 1 : -1);
+        else           target.y += (dy > 0 ? 1 : -1);
+
+        if (target.x >= 0 && target.x < GRID_SIZE && target.y >= 0 && target.y < GRID_SIZE) {
+          dragPreviewTarget = target;
+          if (isAdj(dragStart, target)) {
+            startSwap(dragStart, target);
+            dragStart = null; dragPreviewTarget = null; pointerDown = false;
+          }
+        } else {
+          dragPreviewTarget = null;
+        }
+      }
+    });
+
+    canvas.addEventListener('pointerup', e => {
+      pointerDown = false; dragStart = null; dragPreviewTarget = null; dragCurrent = null;
+      try { canvas.releasePointerCapture(e.pointerId); } catch {}
+    });
+
+    canvas.addEventListener('pointerleave', () => {
+      pointerDown = false; dragStart = null; dragPreviewTarget = null; dragCurrent = null;
+    });
+
+    // Click to activate special
+    canvas.addEventListener('click', e => {
+      if (debugMode && debugSelector) return;
+      if (animating || timeUp) return;
+      const c = getCell(e);
+      const t = grid[c.y]?.[c.x];
+      if (t && t.special) { animating = true; combo = 1; comboPulse = 1; triggerSpecial(t); requestAnimationFrame(matchStep); }
+    });
+
+    // Debug contextmenu
+    canvas.addEventListener('contextmenu', e => {
+      if (!debugMode) return;
+      e.preventDefault();
+      const cell = getCell(e);
+      if (cell.x < 0 || cell.x >= GRID_SIZE || cell.y < 0 || cell.y >= GRID_SIZE) return;
+      debugSelector = { x: cell.x, y: cell.y };
+      draw();
+    });
+
+    // Debug click editor
+    canvas.addEventListener('mousedown', e => {
+      if (!debugMode || !debugSelector) return;
+      const mx = e.offsetX, my = e.offsetY;
+      for (let i = 0; i < COLORS.length; i++) {
+        if (mx >= 8 + i * 42 && mx <= 44 + i * 42 && my <= 28 && my >= 4) {
+          grid[debugSelector.y][debugSelector.x].color = COLORS[i];
+          grid[debugSelector.y][debugSelector.x].special = null;
+          debugSelector = null; draw(); return;
+        }
+      }
+      const specials = ['none', 'horizontal', 'vertical', 'bomb', 'color'];
+      for (let i = 0; i < specials.length; i++) {
+        if (mx >= 8 + i * 60 && mx <= 62 + i * 60 && my >= 36 && my <= 60) {
+          if (specials[i] === 'none') grid[debugSelector.y][debugSelector.x].special = null;
+          else grid[debugSelector.y][debugSelector.x].special = specials[i];
+          onSpecialCreated(grid[debugSelector.y][debugSelector.x]);
+          debugSelector = null; draw(); return;
+        }
+      }
+      debugSelector = null; draw();
+    }, true);
+
+    window.addEventListener('keydown', e => {
+      if (e.key === 'd' || e.key === 'D') { debugMode = !debugMode; debugSelector = null; draw(); }
+      if ((e.key === 'r' || e.key === 'R') && timeUp) { startGame(); }
+    });
+
+    resetBtn.onclick = startGame;
+    startGame();
+  </script>
+</body>
+</html>
+
