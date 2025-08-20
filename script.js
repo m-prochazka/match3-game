@@ -57,17 +57,30 @@
     const DEFAULT_OPTIONS = { sfx: true, shake: true, particles: 'med', reduceMotion: false, volume: 0.9 };
     let OPTIONS = loadOptions();
 
-    function resizeCanvas() {
+function resizeCanvas() {
   const maxWidth = Math.min(600, window.innerWidth - 32);
   const scale = maxWidth / CANVAS_W;
   
   canvas.style.width = maxWidth + 'px';
   canvas.style.height = (CANVAS_H * scale) + 'px';
   canvas.style.margin = '0 auto';
-
-    // Update game wrapper size
+  
+  // Update game wrapper size
   gameWrapper.style.width = maxWidth + 'px';
+  
+  // Force a redraw if the game has started
+  if (hasStarted) {
+    draw();
+  }
 }
+
+// Call this on load and resize
+window.addEventListener('load', function() {
+  resizeCanvas();
+  // Small delay for mobile devices to ensure proper scaling
+  setTimeout(resizeCanvas, 100);
+});
+window.addEventListener('resize', resizeCanvas);
 
     function loadOptions() {
       try {
@@ -849,7 +862,8 @@
         grid.push(row);
       }
       clearInitialMatches();
-      while (!hasAnyLegalMove()) reshuffleBoard();  
+      while (!hasAnyLegalMove()) reshuffleBoard();
+      resizeCanvas();  
       beginCountdown();
       draw();
       resetBtn.textContent = "Restart";
@@ -2069,4 +2083,5 @@ document.addEventListener('touchend', function(event) {
     // boot
     applyOptionsUI();
     attachOptionHandlers();
+    resizeCanvas();
     startGame();
