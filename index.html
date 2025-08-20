@@ -179,6 +179,7 @@ body {
     let timer = 60, timerInterval = null, timeUp = false;
     let highlightingSpecial = false;
     let currentShakeX = 0, currentShakeY = 0;
+    let lastTapTime = 0;
 
     // Flow state
     let hasStarted = false;        // round started (after countdown)
@@ -2043,27 +2044,49 @@ for (const g of runs) {
     });
 
     // Click to activate special
-    canvas.addEventListener('click', e => {
-      if (animating || timeUp || isPaused || !hasStarted || isDrag) return;
-      
-      // Check if this was a quick click (not a failed drag attempt)
-      const clickDuration = Date.now() - dragStartTime;
-      const dragDistance = dragStartPosition ? 
-        Math.hypot(e.clientX - dragStartPosition.x, e.clientY - dragStartPosition.y) : 0;
-      
-      // Only activate special for quick, short-distance clicks
-      if (clickDuration < 250 && dragDistance < 15) {
-        const c = getCell(e);
-        const t = grid[c.y]?.[c.x];
-        
-        if (t && t.special) {
-          animating = true; 
-          combo = 1;
-          triggerSpecial(t);
-          requestAnimationFrame(matchStep);
-        }
-      }
-    });
+canvas.addEventListener('click', e => {
+  if (animating || timeUp || isPaused || !hasStarted) return;
+  
+  // For mobile, use a simpler approach without drag distance checks
+  const now = Date.now();
+  const isDoubleTap = now - lastTapTime < 300;
+  lastTapTime = now;
+  
+  // Prevent triggering on drags (mobile friendly version)
+  if (isDrag && !isDoubleTap) return;
+  
+  const c = getCell(e);
+  const t = grid[c.y]?.[c.x];
+  
+  if (t && t.special) {
+    animating = true; 
+    combo = 1;
+    triggerSpecial(t);
+    requestAnimationFrame(matchStep);
+  }
+});
+
+// Special handling for touch devices
+canvas.addEventListener('touchend', e => {
+  if (animating || timeUp || isPaused || !hasStarted || isDrag) return;
+  
+  e.preventDefault();
+  
+  const now = Date.now();
+  const isDoubleTap = now - lastTapTime < 300;
+  lastTapTime = now;
+  
+  const touch = e.changedTouches[0];
+  const c = getCellFromClient(touch.clientX, touch.clientY);
+  const t = grid[c.y]?.[c.x];
+  
+  if (t && t.special) {
+    animating = true; 
+    combo = 1;
+    triggerSpecial(t);
+    requestAnimationFrame(matchStep);
+  }
+});
 
     // Debug context menu (open palette)
     canvas.addEventListener('contextmenu', e => {
@@ -2142,10 +2165,26 @@ for (const g of runs) {
 
     resetBtn.onclick = startGame;
 
-    // Prevent default touch behaviors
+// Prevent default touch behaviors but allow special tile activation
 document.addEventListener('touchstart', function(e) {
   if (e.target === canvas || e.target.closest('#gameWrapper')) {
-    e.preventDefault();
+    // Only prevent default if not targeting a special tile
+    const rect = canvas.getBoundingClientRect();
+    const touch = e.touches[0];
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
+    
+    // Convert to game coordinates
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const gameX = Math.floor((x * scaleX) / CELL_SIZE);
+    const gameY = Math.floor((y * scaleY - TOPBAR_HEIGHT) / CELL_SIZE);
+    
+    // Check if tapping on a special tile
+    const t = grid[gameY]?.[gameX];
+    if (!t || !t.special) {
+      e.preventDefault();
+    }
   }
 }, { passive: false });
 
