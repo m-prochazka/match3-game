@@ -339,6 +339,11 @@ window.addEventListener('resize', resizeCanvas);
       special:  () => { duck(-4, 0.1); beep({freq: 220, type:'sine', dur:0.07, gain:0.04}); setTimeout(()=>beep({freq:440, dur:0.06, gain:0.03, rand:0.01}),40); },
       colorBomb:() => { duck(-5, 0.15); beep({freq: 200, type:'triangle', dur:0.09, gain:0.05}); setTimeout(()=>beep({freq: 800, dur:0.06, gain:0.03, rand:0.02}),80); },
       sweepTick:() => beep({freq: 520, type:'square', dur:0.03, gain:0.02}),
+      cookie: () => { 
+    duck(-4, 0.1); 
+    beep({freq: 330, type:'sine', dur:0.08, gain:0.035});
+    setTimeout(() => beep({freq: 440, dur:0.06, gain:0.025}), 50);
+  },
       colorBombTrigger: () => { 
         duck(-6, 0.15); 
         beep({freq: 180, type:'sine', dur:0.12, gain:0.06});
@@ -578,6 +583,58 @@ window.addEventListener('resize', resizeCanvas);
     }
 
     // Combo handlers (plus/double rows/cols) + color + double color bomb
+function triggerCookieExplosion(centerPos, used) {
+  // Visual and audio feedback
+  addShake(4);
+  SFX.cookie();
+  addScore(SCORE_BONUS_BOMB);
+  addTime(TIMER_BONUS_SPECIAL, centerPos.x, centerPos.y);
+  
+  // Create visual effect at the center of the 2x2
+  const centerX = centerPos.x * CELL_SIZE + CELL_SIZE;
+  const centerY = TOPBAR_HEIGHT + centerPos.y * CELL_SIZE + CELL_SIZE;
+  spawnParticles(centerX, centerY, grid[centerPos.y][centerPos.x].color, 20);
+  
+  // Destroy two random tiles on the board
+  const availableTiles = [];
+  
+  // Collect all non-matching, non-special tiles
+  for (let y = 0; y < GRID_SIZE; y++) {
+    for (let x = 0; x < GRID_SIZE; x++) {
+      const t = grid[y][x];
+      if (t && !t.matching && !t.special && !used[y][x]) {
+        availableTiles.push({x, y, tile: t});
+      }
+    }
+  }
+  
+  // If we have at least 2 tiles to destroy
+  if (availableTiles.length >= 2) {
+    // Shuffle and pick 2 random tiles
+    for (let i = availableTiles.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [availableTiles[i], availableTiles[j]] = [availableTiles[j], availableTiles[i]];
+    }
+    
+    // Destroy the first two random tiles
+    for (let i = 0; i < Math.min(2, availableTiles.length); i++) {
+      const {x, y, tile} = availableTiles[i];
+      tile.matching = true;
+      used[y][x] = true;
+      
+      // Visual effect for the destroyed tile
+      whiteFlashes.push({ x, y, t: 0, life: 120 });
+      addScore(SCORE_TILE);
+      
+      const destroyX = x * CELL_SIZE + CELL_SIZE / 2;
+      const destroyY = TOPBAR_HEIGHT + y * CELL_SIZE + CELL_SIZE / 2;
+      spawnParticles(destroyX, destroyY, tile.color, 8);
+    }
+  }
+  
+  // Toast notification
+  addToast('Shroom Power!', centerX, centerY - 40);
+}
     function highlightPlusCombo(x, y) {
       for (let y = 0; y < GRID_SIZE; y++) {
         const row = grid[y];
@@ -592,7 +649,12 @@ window.addEventListener('resize', resizeCanvas);
     function triggerPlusCombo(x, y, a, b) {
       highlightPlusCombo(x, y);
       addShake(4); globalPulse = Math.min(1, globalPulse + 0.5);
-      highlightingSpecial = true;
+      highlightingSpecial = true; 
+        // ADD TOAST NOTIFICATION
+  const midX = x * CELL_SIZE + CELL_SIZE/2;
+  const midY = TOPBAR_HEIGHT + y * CELL_SIZE + CELL_SIZE/2;
+  addToast('Plus Power!', midX, midY - 40); 
+
       setTimeout(() => {
         for (let y = 0; y < GRID_SIZE; y++) {
           const row = grid[y];
@@ -642,6 +704,10 @@ window.addEventListener('resize', resizeCanvas);
       highlightDoubleHorizontalCombo(x, y);
       addShake(5); globalPulse = Math.min(1, globalPulse + 0.6);
       highlightingSpecial = true;
+       // ADD TOAST NOTIFICATION
+  const midX = x * CELL_SIZE + CELL_SIZE/2;
+  const midY = TOPBAR_HEIGHT + y * CELL_SIZE + CELL_SIZE/2;
+  addToast('Row Blast!', midX, midY - 40);
       setTimeout(() => {
         for (let y = 0; y < GRID_SIZE; y++) {
           const row = grid[y];
@@ -688,6 +754,10 @@ window.addEventListener('resize', resizeCanvas);
       highlightDoubleVerticalCombo(x, y);
       addShake(5); globalPulse = Math.min(1, globalPulse + 0.6);
       highlightingSpecial = true;
+        // ADD TOAST NOTIFICATION
+  const midX = x * CELL_SIZE + CELL_SIZE/2;
+  const midY = TOPBAR_HEIGHT + y * CELL_SIZE + CELL_SIZE/2;
+  addToast('Column Blast!', midX, midY - 40);
       setTimeout(() => {
         for (let y = 0; y < GRID_SIZE; y++) {
           const row = grid[y];
@@ -738,6 +808,9 @@ window.addEventListener('resize', resizeCanvas);
       const midX = colorBombTile.x * CELL_SIZE + CELL_SIZE/2;
       const midY = TOPBAR_HEIGHT + colorBombTile.y * CELL_SIZE + CELL_SIZE/2;
       spawnParticles(midX, midY, targetColor, 30); // More particles for bigger effect
+
+        // ADD TOAST NOTIFICATION
+    addToast('Color Blast!', midX, midY - 40);
       
       setTimeout(() => {
         // Remove highlight and mark matching
@@ -769,6 +842,11 @@ window.addEventListener('resize', resizeCanvas);
       highlightingSpecial = true; animating = true;
       SFX.colorBomb(); addShake(8); globalPulse = 1;
       [tileA, tileB].forEach(t => { if (!t) return; t.matching = true; t.animProgress = 0; t.special = null; });
+
+        // ADD TOAST NOTIFICATION
+  const midX = CANVAS_W / 2;
+  const midY = TOPBAR_HEIGHT + CANVAS_H / 2;
+  addToast('Mega Blast!', midX, midY - 40);
 
       let row = 0;
       function sweepNextRow() {
@@ -812,6 +890,12 @@ window.addEventListener('resize', resizeCanvas);
       const targetColor = otherTile.color; const specialType = otherTile.special;
       highlightColorBombCombo(targetColor); SFX.colorBomb(); globalPulse = Math.min(1, globalPulse + 0.7);
       highlightingSpecial = true;
+
+        // ADD TOAST NOTIFICATION
+  const midX = colorBombTile.x * CELL_SIZE + CELL_SIZE/2;
+  const midY = TOPBAR_HEIGHT + colorBombTile.y * CELL_SIZE + CELL_SIZE/2;
+  addToast('Color Combo!', midX, midY - 40);
+
       setTimeout(() => {
         for (let y = 0; y < GRID_SIZE; y++) {
           const row = grid[y];
@@ -1243,15 +1327,15 @@ function isAdj(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1; }
     }
 
     // toast + preview when a special is created
-    function onSpecialCreated(tile) {
-      const cx = tile.x * CELL_SIZE + CELL_SIZE/2;
-      const cy = TOPBAR_HEIGHT + tile.y * CELL_SIZE + CELL_SIZE/2;
-      if (tile.special === 'horizontal') { addToast('Striped!', cx, cy - 28); stripedPreview = { type:'h', idx: tile.y, start: performance.now(), dur: 200 }; }
-      else if (tile.special === 'vertical') { addToast('Striped!', cx, cy - 28); stripedPreview = { type:'v', idx: tile.x, start: performance.now(), dur: 200 }; }
-      else if (tile.special === 'bomb') { addToast('Bomb!', cx, cy - 28); }
-      else if (tile.special === 'color') { addToast('Color Bomb!', cx, cy - 28); }
-      whiteFlashes.push({ x: tile.x, y: tile.y, t: 0, life: 160 });
-    }
+function onSpecialCreated(tile) {
+  const cx = tile.x * CELL_SIZE + CELL_SIZE/2;
+  const cy = TOPBAR_HEIGHT + tile.y * CELL_SIZE + CELL_SIZE/2;
+  if (tile.special === 'horizontal') { addToast('Striped Shroom!', cx, cy - 28); stripedPreview = { type:'h', idx: tile.y, start: performance.now(), dur: 200 }; }
+  else if (tile.special === 'vertical') { addToast('Striped Shroom!', cx, cy - 28); stripedPreview = { type:'v', idx: tile.x, start: performance.now(), dur: 200 }; }
+  else if (tile.special === 'bomb') { addToast('Boom Shroom!', cx, cy - 28); }
+  else if (tile.special === 'color') { addToast('Rainbow Shroom!', cx, cy - 28); }
+  whiteFlashes.push({ x: tile.x, y: tile.y, t: 0, life: 160 });
+}
 
     function findAllRuns() {
       const runs = [];
@@ -1310,8 +1394,35 @@ function isAdj(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1; }
         }
       }
 
-      return runs;
+  // ADD 2x2 SQUARE DETECTION
+  for (let y = 0; y < GRID_SIZE - 1; y++) {
+    for (let x = 0; x < GRID_SIZE - 1; x++) {
+      const tile = grid[y][x];
+      if (!tile || !isMatchableTile(tile)) continue;
+      
+      const color = tile.color;
+      
+      // Check if we have a 2x2 square of the same color
+      if (sameBaseColor(grid[y][x+1], color) &&
+          sameBaseColor(grid[y+1][x], color) &&
+          sameBaseColor(grid[y+1][x+1], color)) {
+        
+        runs.push({
+          positions: [
+            {x, y},
+            {x: x+1, y},
+            {x, y: y+1},
+            {x: x+1, y: y+1}
+          ],
+          orient: 'square',
+          is2x2: true
+        });
+      }
     }
+  }
+
+  return runs;
+}
 
     // === Priority: (1) straight 5+ ⇒ COLOR BOMB  (2) 5 in L/T ⇒ BOMB
     //                (3) straight 4 ⇒ STRIPED
@@ -1384,6 +1495,30 @@ function markMatchesV3(runs, movedTiles = []) {
       }
     }
     return; // IMPORTANT: stop here so 5/4 rules don't override
+  }
+
+  // ADD 2x2 SQUARE HANDLING - should come after straight 5+ but before T/L shapes
+  const squareMatches = runs.filter(r => r.is2x2);
+  for (const square of squareMatches) {
+    // Mark all tiles in the square for removal
+    for (const pos of square.positions) {
+      if (!used[pos.y][pos.x]) {
+        const t = grid[pos.y][pos.x];
+        t.matching = true;
+        used[pos.y][pos.x] = true;
+        
+        // Add score for each tile
+        addScore(SCORE_TILE);
+        
+        // If it contains a special, queue it
+        if (t.special && !t.triggered && !specialsToTrigger.includes(t)) {
+          specialsToTrigger.push(t);
+        }
+      }
+    }
+    
+    // Create the cookie explosion effect
+    triggerCookieExplosion(square.positions[0], used);
   }
 
 // 2. T/L shapes (bomb)
