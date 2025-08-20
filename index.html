@@ -2,14 +2,20 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
-  <title>Match-3 Game</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Schroom 'n' Match</title>
   <style>
     :root { color-scheme: dark; }
-    body {
-      margin: 0; display: flex; flex-direction: column; align-items: center;
-      justify-content: flex-start; min-height: 100vh; background: #222; font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif;
-    }
+
+body {
+  margin: 0; display: flex; flex-direction: column; align-items: center;
+  justify-content: flex-start; min-height: 100vh; background: #222; font-family: system-ui, -apple-system, Segoe UI, Arial, sans-serif;
+  overflow: hidden; 
+  position: fixed; 
+  width: 100%; 
+  height: 100%; 
+  touch-action: manipulation; 
+}
     #gameWrapper { margin-top: 16px; position: relative; }
     canvas { background: #333; border-radius: 16px; box-shadow: 0 4px 32px #000a; display: block; }
 
@@ -24,8 +30,15 @@
     #resetBtn:active, .hud-btn:active { transform: scale(0.97); }
 
     .hud-bar {
-      width: 600px; display: flex; justify-content: space-between; gap: 8px; margin-top: 12px;
-    }
+  width: 100%;
+  max-width: 600px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 0 10px;
+  box-sizing: border-box;
+}
     .hud-btn { background: #444; padding: 8px 14px; font-size: 14px; }
     .hud-btn:active { transform: scale(0.98); }
 
@@ -148,6 +161,8 @@
     const optReduce = document.getElementById('optReduce');
     const optVolume = document.getElementById('optVolume');
 
+    const gameWrapper = document.getElementById('gameWrapper');
+
     canvas.width = CANVAS_W;
     canvas.height = CANVAS_H;
     const ctx = canvas.getContext('2d');
@@ -179,6 +194,18 @@
     // Options
     const DEFAULT_OPTIONS = { sfx: true, shake: true, particles: 'med', reduceMotion: false, volume: 0.9 };
     let OPTIONS = loadOptions();
+
+    function resizeCanvas() {
+  const maxWidth = Math.min(600, window.innerWidth - 32);
+  const scale = maxWidth / CANVAS_W;
+  
+  canvas.style.width = maxWidth + 'px';
+  canvas.style.height = (CANVAS_H * scale) + 'px';
+  canvas.style.margin = '0 auto';
+
+    // Update game wrapper size
+  gameWrapper.style.width = maxWidth + 'px';
+}
 
     function loadOptions() {
       try {
@@ -215,10 +242,10 @@
     const SCORE_BONUS_COLOR_TRIGGER = 250; // More than normal color bomb (increased from 150)
     
     // Timer bonuses
-    const TIMER_BONUS_SMALL = 2;          // seconds added for small matches
-    const TIMER_BONUS_MEDIUM = 3;         // seconds added for medium matches
-    const TIMER_BONUS_LARGE = 5;          // seconds added for large matches
-    const TIMER_BONUS_SPECIAL = 7;        // seconds added for special tile activation
+    const TIMER_BONUS_SMALL = 0.5;          // seconds added for small matches
+    const TIMER_BONUS_MEDIUM = 1;         // seconds added for medium matches
+    const TIMER_BONUS_LARGE = 1.5;          // seconds added for large matches
+    const TIMER_BONUS_SPECIAL = 2;        // seconds added for special tile activation
 
     function addScore(n) {
       const mult = 1 + 0.15 * Math.max(0, combo - 1); // +15% per cascade step
@@ -229,7 +256,7 @@
       if (!hasStarted || timeUp) return;
       
       timer += seconds;
-      if (timer > 99) timer = 99; // Cap at 99 seconds
+      // if (timer > 99) timer = 99; // Cap at 99 seconds
       
       // Create visual timer bonus notification
       if (x !== undefined && y !== undefined) {
@@ -1029,6 +1056,20 @@
       }
     }
 
+   function showTimerBonus(seconds, x, y) {
+      const bonusX = x * CELL_SIZE + CELL_SIZE / 2;
+      const bonusY = TOPBAR_HEIGHT + y * CELL_SIZE + CELL_SIZE / 2;
+      timerBonuses.push({
+        text: `+${seconds}s`,
+        x: bonusX,
+        y: bonusY,
+        t: 0,
+        life: 1000
+      });
+      SFX.timeBonus();
+    }
+
+
     // --- Drawing / UI ---
     function draw() {
       
@@ -1233,23 +1274,31 @@
     }
 
     // --- Match Logic helpers ---
-    function getCell(e) {
-      const r = canvas.getBoundingClientRect();
-      const localX = (e.clientX - r.left) - currentShakeX;
-      const localY = (e.clientY - r.top) - currentShakeY - TOPBAR_HEIGHT;
-      const x = Math.floor(localX / CELL_SIZE);
-      const y = Math.floor(localY / CELL_SIZE);
-      return { x, y };
-    }
-    function getCellFromClient(clientX, clientY) {
-      const r = canvas.getBoundingClientRect();
-      const localX = (clientX - r.left) - currentShakeX;
-      const localY = (clientY - r.top) - currentShakeY - TOPBAR_HEIGHT;
-      const x = Math.floor(localX / CELL_SIZE);
-      const y = Math.floor(localY / CELL_SIZE);
-      return { x, y };
-    }
-    function isAdj(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1; }
+function getCell(e) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  
+  const localX = (e.clientX - rect.left) * scaleX - currentShakeX;
+  const localY = (e.clientY - rect.top) * scaleY - currentShakeY - TOPBAR_HEIGHT;
+  const x = Math.floor(localX / CELL_SIZE);
+  const y = Math.floor(localY / CELL_SIZE);
+  return { x, y };
+}
+
+function getCellFromClient(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  
+  const localX = (clientX - rect.left) * scaleX - currentShakeX;
+  const localY = (clientY - rect.top) * scaleY - currentShakeY - TOPBAR_HEIGHT;
+  const x = Math.floor(localX / CELL_SIZE);
+  const y = Math.floor(localY / CELL_SIZE);
+  return { x, y };
+}
+
+function isAdj(a, b) { return Math.abs(a.x - b.x) + Math.abs(a.y - b.y) === 1; }
 
     function hasAnyLegalMove() {
       // try swapping each tile with right/down neighbor and check for a 3+ run
@@ -1512,29 +1561,50 @@ for (const h of runs.filter(r => r.orient === 'h' && r.positions.length >= 3)) {
   }
 
   // Default: mark all remaining run tiles for removal and award points
-  for (const g of runs) {
-    for (const pos of g.positions) {
-      if (used[pos.y][pos.x]) continue;
-      const t = grid[pos.y][pos.x];
-      if (!t) continue;
-      t.matching = true;
-      let basePoints = 0;
-      if (!t.special) {
-        if (g.positions.length === 3) basePoints = 60;
-        else if (g.positions.length === 4) basePoints = 120;
-        else if (g.positions.length >= 5) basePoints = 200;
-        
-        // Add time bonus based on match size
-        if (g.positions.length === 3) addTime(TIMER_BONUS_SMALL, pos.x, pos.y);
-        else if (g.positions.length === 4) addTime(TIMER_BONUS_MEDIUM, pos.x, pos.y);
-        else if (g.positions.length >= 5) addTime(TIMER_BONUS_LARGE, pos.x, pos.y);
-      }
-      // If run contains a special (not color bomb), queue it to trigger
-      if (t.special && t.special !== 'color' && !t.triggered && !specialsToTrigger.includes(t)) {
-        specialsToTrigger.push(t);
+for (const g of runs) {
+  let timerBonusAdded = false; // Track if we've added timer bonus for this group
+  
+  for (const pos of g.positions) {
+    if (used[pos.y][pos.x]) continue;
+    const t = grid[pos.y][pos.x];
+    if (!t) continue;
+    t.matching = true;
+    let basePoints = 0;
+    
+    if (!t.special) {
+      if (g.positions.length === 3) basePoints = 60;
+      else if (g.positions.length === 4) basePoints = 120;
+      else if (g.positions.length >= 5) basePoints = 200;
+      
+      // Add time bonus based on match size - ONLY ONCE PER GROUP
+      if (!timerBonusAdded) {
+        if (g.positions.length === 3) {
+          addTime(TIMER_BONUS_SMALL);
+          // Show notification at the center of the match group
+          const centerX = Math.round(g.positions.reduce((sum, p) => sum + p.x, 0) / g.positions.length);
+          const centerY = Math.round(g.positions.reduce((sum, p) => sum + p.y, 0) / g.positions.length);
+          showTimerBonus(TIMER_BONUS_SMALL, centerX, centerY);
+        } else if (g.positions.length === 4) {
+          addTime(TIMER_BONUS_MEDIUM);
+          const centerX = Math.round(g.positions.reduce((sum, p) => sum + p.x, 0) / g.positions.length);
+          const centerY = Math.round(g.positions.reduce((sum, p) => sum + p.y, 0) / g.positions.length);
+          showTimerBonus(TIMER_BONUS_MEDIUM, centerX, centerY);
+        } else if (g.positions.length >= 5) {
+          addTime(TIMER_BONUS_LARGE);
+          const centerX = Math.round(g.positions.reduce((sum, p) => sum + p.x, 0) / g.positions.length);
+          const centerY = Math.round(g.positions.reduce((sum, p) => sum + p.y, 0) / g.positions.length);
+          showTimerBonus(TIMER_BONUS_LARGE, centerX, centerY);
+        }
+        timerBonusAdded = true; // Mark that we've added the bonus for this group
       }
     }
+    
+    // If run contains a special (not color bomb), queue it to trigger
+    if (t.special && t.special !== 'color' && !t.triggered && !specialsToTrigger.includes(t)) {
+      specialsToTrigger.push(t);
+    }
   }
+}
 }
 
     function getMatchGrid() {
@@ -2067,7 +2137,34 @@ for (const h of runs.filter(r => r.orient === 'h' && r.positions.length >= 3)) {
       if ((e.key === 'r' || e.key === 'R') && timeUp) startGame();
     });
 
+    window.addEventListener('load', resizeCanvas);
+    window.addEventListener('resize', resizeCanvas);
+
     resetBtn.onclick = startGame;
+
+    // Prevent default touch behaviors
+document.addEventListener('touchstart', function(e) {
+  if (e.target === canvas || e.target.closest('#gameWrapper')) {
+    e.preventDefault();
+  }
+}, { passive: false });
+
+document.addEventListener('touchmove', function(e) {
+  if (e.target === canvas || e.target.closest('#gameWrapper')) {
+    e.preventDefault();
+  }
+}, { passive: false });
+
+// Prevent double-tap zoom
+let lastTouchEnd = 0;
+document.addEventListener('touchend', function(event) {
+  const now = (new Date()).getTime();
+  if (now - lastTouchEnd <= 300) {
+    event.preventDefault();
+  }
+  lastTouchEnd = now;
+}, false);
+
 
     // boot
     applyOptionsUI();
